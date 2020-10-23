@@ -379,14 +379,16 @@ func (s *RedisStore) RemoveFromQueue(rootKey string, memberKey string) error {
 
 // SetAdd add a member (identified by a key) in the cached set
 func (s *RedisStore) SetAdd(rootKey string, memberKey string, member interface{}) error {
-	err := s.Client.ZAdd(rootKey, redis.Z{
+	if err := s.SetWithTTL(Key(rootKey, memberKey), member, -1); err != nil {
+		return sdk.WrapError(err, "error adding saving member")
+	}
+	if err := s.Client.ZAdd(rootKey, redis.Z{
 		Member: memberKey,
 		Score:  float64(time.Now().UnixNano()),
-	}).Err()
-	if err != nil {
+	}).Err(); err != nil {
 		return sdk.WrapError(err, "error on SetAdd")
 	}
-	return s.SetWithTTL(Key(rootKey, memberKey), member, -1)
+	return nil
 }
 
 // SetRemove removes a member from a set
@@ -437,8 +439,7 @@ func (s *RedisStore) SetScan(ctx context.Context, key string, members ...interfa
 					return sdk.WrapError(err, "redis>SetScan unable to delete member %s", keys[i])
 				}
 				log.Info(ctx, "redis> member %s deleted", keys[i])
-				//return sdk.WithStack(fmt.Errorf("SetScan member %s not found", keys[i]))
-				continue
+				return sdk.WithStack(fmt.Errorf("SetScan member %s not found", keys[i]))
 			}
 
 			if err := json.Unmarshal([]byte(res[i].(string)), members[i]); err != nil {

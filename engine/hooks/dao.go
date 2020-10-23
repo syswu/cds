@@ -48,9 +48,6 @@ func (d *dao) FindAllTasks(ctx context.Context) ([]sdk.Task, error) {
 
 	alltasks := make([]sdk.Task, nbTasks)
 	for i := 0; i < nbTasks; i++ {
-		if tasks[i].UUID == "" { // FIXME
-			continue
-		}
 		alltasks[i] = *tasks[i]
 	}
 
