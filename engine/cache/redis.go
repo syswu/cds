@@ -437,7 +437,8 @@ func (s *RedisStore) SetScan(ctx context.Context, key string, members ...interfa
 					return sdk.WrapError(err, "redis>SetScan unable to delete member %s", keys[i])
 				}
 				log.Info(ctx, "redis> member %s deleted", keys[i])
-				return sdk.WithStack(fmt.Errorf("SetScan member %s not found", keys[i]))
+				//return sdk.WithStack(fmt.Errorf("SetScan member %s not found", keys[i]))
+				continue
 			}
 
 			if err := json.Unmarshal([]byte(res[i].(string)), members[i]); err != nil {
