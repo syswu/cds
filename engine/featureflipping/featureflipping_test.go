@@ -7,9 +7,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ovh/cds/engine/api/test"
 	"github.com/ovh/cds/engine/featureflipping"
 	"github.com/ovh/cds/engine/gorpmapper"
+	"github.com/ovh/cds/engine/test"
 	"github.com/ovh/cds/sdk"
 )
 
@@ -23,7 +23,7 @@ func TestIsEnabled(t *testing.T) {
 		Name: sdk.RandomString(10),
 		Rule: `return my_var == "true"`,
 	}
-	require.NoError(t, featureflipping.Insert(context.TODO(), m, db, &f))
+	require.NoError(t, featureflipping.Insert(m, db, &f))
 
 	assert.True(t, featureflipping.Exists(context.TODO(), m, db, f.Name))
 

@@ -49,7 +49,7 @@ func startWorkerStarters(ctx context.Context, h Interface) chan<- workerStarterR
 		maxProv = defaultMaxProvisioning
 	}
 	for workerNum := 0; workerNum < maxProv; workerNum++ {
-		sdk.GoRoutine(ctx, "workerStarter", func(ctx context.Context) {
+		h.GetGoRoutines().Run(ctx, "workerStarter", func(ctx context.Context) {
 			workerStarter(ctx, h, fmt.Sprintf("%d", workerNum), jobs)
 		}, PanicDump(h))
 	}
@@ -145,7 +145,8 @@ func spawnWorkerForJob(ctx context.Context, h Interface, j workerStarterRequest)
 
 	ctxQueueJobBook, next := telemetry.Span(ctxJob, "hatchery.QueueJobBook")
 	ctxQueueJobBook, cancel := context.WithTimeout(ctxQueueJobBook, 10*time.Second)
-	if err := h.CDSClient().QueueJobBook(ctxQueueJobBook, j.id); err != nil {
+	bookedInfos, err := h.CDSClient().QueueJobBook(ctxQueueJobBook, j.id)
+	if err != nil {
 		next()
 		// perhaps already booked by another hatchery
 		log.Info(ctx, "hatchery> spawnWorkerForJob> %d - cannot book job %d: %s", j.timestamp, j.id, err)
@@ -175,6 +176,12 @@ func spawnWorkerForJob(ctx context.Context, h Interface, j workerStarterRequest)
 		NodeRunID:    j.workflowNodeRunID,
 		Requirements: j.requirements,
 		HatcheryName: h.Service().Name,
+		NodeRunName:  bookedInfos.NodeRunName,
+		RunID:        bookedInfos.RunID,
+		WorkflowID:   bookedInfos.WorkflowID,
+		WorkflowName: bookedInfos.WorkflowName,
+		ProjectKey:   bookedInfos.ProjectKey,
+		JobName:      bookedInfos.JobName,
 	}
 
 	log.Info(ctx, "hatchery> spawnWorkerForJob> SpawnWorker> starting model %s for job %d with name %s", modelName, arg.JobID, arg.WorkerName)
@@ -249,16 +256,7 @@ func generateWorkerName(hatcheryName string, isRegister bool, modelName string) 
 	if len(workerName) <= maxLength {
 		return slug.Convert(workerName)
 	}
-	if len(modelName) > 15 {
-		modelName = modelName[:15]
-	}
+	modelName = sdk.StringFirstN(modelName, 15)
 	workerName = fmt.Sprintf("%s%s%s-%s", prefix, hName, modelName, random)
-	if len(workerName) <= maxLength {
-		return slug.Convert(workerName)
-	}
-
-	if len(workerName) > maxLength {
-		return slug.Convert(workerName[:maxLength])
-	}
-	return slug.Convert(workerName)
+	return slug.Convert(sdk.StringFirstN(workerName, maxLength))
 }

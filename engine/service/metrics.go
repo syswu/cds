@@ -97,7 +97,7 @@ func (c *Common) CommonMetricsHandler() Handler {
 
 var onceMetrics sync.Once
 
-func RegisterCommonMetricsView(ctx context.Context) {
+func (c *Common) RegisterCommonMetricsView(ctx context.Context) {
 	onceMetrics.Do(func() {
 		allocStats := stats.Int64(
 			"cds/alloc",
@@ -125,12 +125,13 @@ func RegisterCommonMetricsView(ctx context.Context) {
 
 		tagServiceType := telemetry.MustNewKey(telemetry.TagServiceType)
 		tagServiceName := telemetry.MustNewKey(telemetry.TagServiceName)
+		tagHostname := telemetry.MustNewKey(telemetry.TagHostname)
 
 		allocView := view.View{
 			Name:        "cds/mem/alloc",
 			Description: allocStats.Description(),
 			Measure:     allocStats,
-			TagKeys:     []tag.Key{tagServiceType, tagServiceName},
+			TagKeys:     []tag.Key{tagServiceType, tagServiceName, tagHostname},
 			Aggregation: view.LastValue(),
 		}
 
@@ -138,7 +139,7 @@ func RegisterCommonMetricsView(ctx context.Context) {
 			Name:        "cds/mem/total_alloc",
 			Description: totalAllocStats.Description(),
 			Measure:     totalAllocStats,
-			TagKeys:     []tag.Key{tagServiceType, tagServiceName},
+			TagKeys:     []tag.Key{tagServiceType, tagServiceName, tagHostname},
 			Aggregation: view.LastValue(),
 		}
 
@@ -146,7 +147,7 @@ func RegisterCommonMetricsView(ctx context.Context) {
 			Name:        "cds/mem/sys",
 			Description: sysStats.Description(),
 			Measure:     sysStats,
-			TagKeys:     []tag.Key{tagServiceType, tagServiceName},
+			TagKeys:     []tag.Key{tagServiceType, tagServiceName, tagHostname},
 			Aggregation: view.LastValue(),
 		}
 
@@ -154,7 +155,7 @@ func RegisterCommonMetricsView(ctx context.Context) {
 			Name:        "cds/mem/gc",
 			Description: gcStats.Description(),
 			Measure:     gcStats,
-			TagKeys:     []tag.Key{tagServiceType, tagServiceName},
+			TagKeys:     []tag.Key{tagServiceType, tagServiceName, tagHostname},
 			Aggregation: view.LastValue(),
 		}
 
@@ -163,13 +164,15 @@ func RegisterCommonMetricsView(ctx context.Context) {
 			panic(fmt.Errorf("unable to register service metrics view: %v", err))
 		}
 
-		sdk.GoRoutine(ctx, "service_metrics", func(ctx context.Context) {
+		c.GoRoutines.Run(ctx, "service_metrics", func(ctx context.Context) {
 			var maxMemoryS = os.Getenv("CDS_MAX_HEAP_SIZE") // in bytes
 			var maxMemory uint64
 			var onceMaxMemorySignal = new(sync.Once)
 			if maxMemoryS != "" {
 				maxMemory, _ = strconv.ParseUint(maxMemoryS, 10, 64)
 			}
+			hostname, _ := os.Hostname()
+			ctx = telemetry.ContextWithTag(ctx, telemetry.TagHostname, hostname)
 
 			var tick = time.NewTicker(10 * time.Second)
 			defer tick.Stop()

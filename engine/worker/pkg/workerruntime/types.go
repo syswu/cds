@@ -41,7 +41,18 @@ type TmplPath struct {
 	Destination string `json:"destination"`
 }
 
+type CDSVersionSet struct {
+	Value string `json:"value"`
+}
+
 type Level string
+
+const (
+	LevelDebug Level = "DEBUG"
+	LevelInfo  Level = "INFO"
+	LevelWarn  Level = "WARN"
+	LevelError Level = "ERROR"
+)
 
 type (
 	contextKey int
@@ -50,13 +61,10 @@ type (
 const (
 	jobID contextKey = iota
 	stepOrder
+	stepName
 	workDir
 	keysDir
 	tmpDir
-	LevelDebug Level = "DEBUG"
-	LevelInfo  Level = "INFO"
-	LevelWarn  Level = "WARN"
-	LevelError Level = "ERROR"
 )
 
 type Runtime interface {
@@ -100,6 +108,19 @@ func StepOrder(ctx context.Context) (int, error) {
 
 func SetStepOrder(ctx context.Context, i int) context.Context {
 	return context.WithValue(ctx, stepOrder, i)
+}
+
+func StepName(ctx context.Context) (string, error) {
+	stepNameInt := ctx.Value(stepName)
+	stepName, ok := stepNameInt.(string)
+	if !ok {
+		return "", fmt.Errorf("unable to get step name: got %v", stepName)
+	}
+	return stepName, nil
+}
+
+func SetStepName(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, stepName, name)
 }
 
 func WorkingDirectory(ctx context.Context) (afero.File, error) {

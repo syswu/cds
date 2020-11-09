@@ -15,7 +15,7 @@ import (
 	"github.com/fsamin/go-dump"
 	"golang.org/x/crypto/ssh"
 
-	"github.com/ovh/cds/engine/api/cache"
+	"github.com/ovh/cds/engine/cache"
 	"github.com/ovh/cds/sdk"
 	"github.com/ovh/cds/sdk/log"
 )
@@ -244,11 +244,12 @@ func (s *Service) ComputeGerritStreamEvent(ctx context.Context, vcsServer string
 }
 
 // ListenGerritStreamEvent listen the gerrit event stream
-func ListenGerritStreamEvent(ctx context.Context, store cache.Store, v sdk.VCSConfiguration, gerritEventChan chan<- GerritEvent) {
+func ListenGerritStreamEvent(ctx context.Context, store cache.Store, goRoutines *sdk.GoRoutines, v sdk.VCSConfiguration, gerritEventChan chan<- GerritEvent) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	signer, err := ssh.ParsePrivateKey([]byte(v.Password))
 	if err != nil {
-		log.Error(ctx, "unable to read ssh key: %v", err)
-		return
+		return sdk.WithStack(err)
 	}
 
 	// Create config
@@ -265,37 +266,40 @@ func ListenGerritStreamEvent(ctx context.Context, store cache.Store, v sdk.VCSCo
 	// Dial TCP
 	conn, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", URL.Hostname(), v.SSHPort), config)
 	if err != nil {
-		log.Error(ctx, "ListenGerritStreamEvent> unable to open ssh connection to gerrit: %v", err)
-		return
+		return sdk.WithStack(err)
 	}
 	defer conn.Close()
 
 	session, err := conn.NewSession()
 	if err != nil {
-		log.Error(ctx, "ListenGerritStreamEvent> unable to create new session: %v", err)
-		return
+		return sdk.WithStack(err)
 	}
+	defer session.Close()
 
 	r, w := io.Pipe()
+	defer r.Close()
+	defer w.Close()
 	session.Stdout = w
 
 	stdoutreader := bufio.NewReader(r)
 
-	go func() {
+	goRoutines.Exec(ctx, "gerrit-ssh-run", func(ctx context.Context) {
 		// Run command
 		log.Debug("Listening to gerrit event stream %s", v.URL)
 		if err := session.Run("gerrit stream-events"); err != nil {
 			log.Error(ctx, "ListenGerritStreamEvent> unable to run gerrit stream-events command: %v", err)
 		}
-	}()
+		cancel()
+		r.Close()
+		return
+	})
 
 	lockKey := cache.Key("gerrit", "event", "lock")
 	tick := time.NewTicker(50 * time.Millisecond)
 	for {
 		select {
 		case <-ctx.Done():
-			session.Close()
-			conn.Close()
+			return ctx.Err()
 		case <-tick.C:
 			line, errs := stdoutreader.ReadString('\n')
 			if errs == io.EOF {
@@ -317,7 +321,10 @@ func ListenGerritStreamEvent(ctx context.Context, store cache.Store, v sdk.VCSCo
 
 			// Avoid that 2 hook uservice dispatch the same event
 			// Take the lock to dispatch an event
-			_, _ = store.Lock(lockKey, time.Minute, 100, 10)
+			locked, err := store.Lock(lockKey, time.Minute, 100, 15)
+			if err != nil {
+				log.Error(ctx, "unable to lock %s: %v", lockKey, err)
+			}
 
 			// compute md5
 			hasher := md5.New()
@@ -333,8 +340,10 @@ func ListenGerritStreamEvent(ctx context.Context, store cache.Store, v sdk.VCSCo
 			}
 
 			// release lock
-			if err := store.Unlock(lockKey); err == nil {
-				log.Error(ctx, "unable to unlock %s. Waiting lock timeout", lockKey)
+			if locked {
+				if err := store.Unlock(lockKey); err == nil {
+					log.Error(ctx, "unable to unlock %s: %v", lockKey, err)
+				}
 			}
 
 			if !b {

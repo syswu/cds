@@ -4,7 +4,7 @@ import { getTestBed, TestBed } from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
 import { TranslateLoader, TranslateModule, TranslateParser, TranslateService } from '@ngx-translate/core';
 import { Store } from '@ngxs/store';
-import { ToasterService } from 'angular2-toaster/angular2-toaster';
+import { ToasterService } from 'angular2-toaster-sgu';
 import { Project } from 'app/model/project.model';
 import { RepositoriesManager } from 'app/model/repositories.model';
 import { ApplicationService } from 'app/service/application/application.service';
@@ -17,6 +17,7 @@ import { ProjectService } from 'app/service/project/project.service';
 import { ProjectStore } from 'app/service/project/project.store';
 import { RepoManagerService } from 'app/service/repomanager/project.repomanager.service';
 import { RouterService } from 'app/service/router/router.service';
+import { HelpService } from 'app/service/services.module';
 import { UserService } from 'app/service/user/user.service';
 import { VariableService } from 'app/service/variable/variable.service';
 import { WorkflowRunService } from 'app/service/workflow/run/workflow.run.service';
@@ -46,6 +47,7 @@ describe('CDS: Project RepoManager List Component', () => {
                 EnvironmentService,
                 VariableService,
                 ToasterService,
+                HelpService,
                 TranslateService,
                 MonitoringService,
                 ApplicationService,

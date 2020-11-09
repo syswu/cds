@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/ovh/cds/sdk"
@@ -12,25 +13,41 @@ import (
 	"github.com/ovh/cds/sdk/telemetry"
 )
 
-// CommonMonitoring returns common part of MonitoringStatus
-func (c *Common) CommonMonitoring() sdk.MonitoringStatus {
+// NewMonitoringStatus returns a MonitoringStatus for the current service
+func (c *Common) NewMonitoringStatus() *sdk.MonitoringStatus {
 	t := time.Now()
-	return sdk.MonitoringStatus{
-		Now: t,
-		Lines: []sdk.MonitoringStatusLine{{
-			Component: "Version",
-			Value:     sdk.VERSION,
-			Status:    sdk.MonitoringStatusOK,
-		}, {
-			Component: "Uptime",
-			Value:     time.Since(c.StartupTime).String(),
-			Status:    sdk.MonitoringStatusOK,
-		}, {
-			Component: "Time",
-			Value:     fmt.Sprintf("%dh%dm%ds", t.Hour(), t.Minute(), t.Second()),
-			Status:    sdk.MonitoringStatusOK,
-		}},
+	hostname, err := os.Hostname()
+	if err != nil {
+		log.Error(context.Background(), "NewMonitoringStatus: error on getting hostname")
 	}
+
+	s := &sdk.MonitoringStatus{
+		Now:             t,
+		ServiceType:     c.Type(),
+		ServiceName:     c.Name(),
+		ServiceHostname: hostname,
+	}
+	s.AddLine(c.commonMonitoring(t)...)
+	return s
+}
+
+// CommonMonitoring returns common monitoring status lines
+func (c *Common) commonMonitoring(t time.Time) []sdk.MonitoringStatusLine {
+	lines := []sdk.MonitoringStatusLine{{
+		Component: "Version",
+		Value:     sdk.VERSION,
+		Status:    sdk.MonitoringStatusOK,
+	}, {
+		Component: "Uptime",
+		Value:     time.Since(c.StartupTime).String(),
+		Status:    sdk.MonitoringStatusOK,
+	}, {
+		Component: "Time",
+		Value:     t.Format(time.RFC3339),
+		Status:    sdk.MonitoringStatusOK,
+	}}
+
+	return append(lines, c.GoRoutines.GetStatus()...)
 }
 
 func (c *Common) Type() string {
@@ -47,14 +64,14 @@ func (c *Common) Start(ctx context.Context, cfg cdsclient.ServiceConfig) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	var err error
 	var firstAttempt = true
 loop:
 	for {
 		select {
-		case <-ctx.Done():
+		case <-ctxTimeout.Done():
 			fmt.Println()
 			return err
 		default:
@@ -82,11 +99,12 @@ loop:
 		telemetry.TagServiceName, c.Name(),
 	)
 
-	RegisterCommonMetricsView(ctx)
+	c.RegisterCommonMetricsView(ctx)
 
 	return nil
 }
 
+// Register registers a new service on API
 func (c *Common) Register(ctx context.Context, cfg sdk.ServiceConfig) error {
 	log.Info(ctx, "Registing service %s(%T) %s", c.Type(), c, c.Name())
 
@@ -123,8 +141,19 @@ func (c *Common) Register(ctx context.Context, cfg sdk.ServiceConfig) error {
 	return nil
 }
 
+// Unregister logout the service
+func (c *Common) Unregister(ctx context.Context) error {
+	// no logout needed for api
+	if c.ServiceType == "api" {
+		return nil
+	}
+
+	log.Info(ctx, "Unregisting service %s(%T) %s", c.Type(), c, c.Name())
+	return c.Client.AuthConsumerSignout()
+}
+
 // Heartbeat have to be launch as a goroutine, call DoHeartBeat each 30s
-func (c *Common) Heartbeat(ctx context.Context, status func(ctx context.Context) sdk.MonitoringStatus) error {
+func (c *Common) Heartbeat(ctx context.Context, status func(ctx context.Context) *sdk.MonitoringStatus) error {
 	// no heartbeat for api
 	if c.ServiceType == "api" {
 		return nil

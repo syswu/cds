@@ -1,3 +1,4 @@
+import { HttpClient } from '@angular/common/http';
 import {
     ChangeDetectionStrategy, ChangeDetectorRef,
     Component,
@@ -15,11 +16,12 @@ import {
 } from 'ansi_up';
 import { Action } from 'app/model/action.model';
 import { Job, StepStatus } from 'app/model/job.model';
-import { BuildResult, Log, PipelineStatus } from 'app/model/pipeline.model';
+import { BuildResult, CDNLogLink, Log, PipelineStatus } from 'app/model/pipeline.model';
 import { WorkflowNodeJobRun } from 'app/model/workflow.run.model';
 import { WorkflowService } from 'app/service/workflow/workflow.service';
 import { AutoUnsubscribe } from 'app/shared/decorator/autoUnsubscribe';
 import { DurationService } from 'app/shared/duration/duration.service';
+import { FeatureState } from 'app/store/feature.state';
 import { ProjectState } from 'app/store/project.state';
 import { WorkflowState, WorkflowStateModel } from 'app/store/workflow.state';
 import cloneDeep from 'lodash-es/cloneDeep';
@@ -40,10 +42,6 @@ export class WorkflowStepLogComponent implements OnInit, OnDestroy {
     job: Job;
     step: Action;
     stepStatus: StepStatus;
-
-    @Select(WorkflowState.getSelectedWorkflowNodeJobRun()) nodeJobRun$: Observable<WorkflowNodeJobRun>;
-    nodeJobRunSubs: Subscription;
-
     logs: Log;
     showLogs = false;
 
@@ -73,14 +71,14 @@ export class WorkflowStepLogComponent implements OnInit, OnDestroy {
     @ViewChild('logsContent') logsElt: ElementRef;
 
     constructor(
-        private _durationService: DurationService,
         private _router: Router,
         private _route: ActivatedRoute,
         private _hostElement: ElementRef,
         private _cd: ChangeDetectorRef,
         private _store: Store,
         private _ngZone: NgZone,
-        private _workflowService: WorkflowService
+        private _workflowService: WorkflowService,
+        private _http: HttpClient
     ) {
         this.ansi_up.escape_for_html = !this.htmlViewSelected;
     }
@@ -88,55 +86,8 @@ export class WorkflowStepLogComponent implements OnInit, OnDestroy {
     ngOnDestroy(): void { } // Should be set to use @AutoUnsubscribe with AOT
 
     ngOnInit(): void {
-        this.nodeJobRunSubs = this.nodeJobRun$.subscribe(nrj => {
-            if (!nrj || !nrj.job.step_status) {
-                return;
-            }
-
-            this.job = nrj.job;
-
-            let invalidStepOrder = !(this.stepOrder < this.job.action.actions.length) || !(this.stepOrder < this.job.step_status.length);
-            if (invalidStepOrder) {
-                return;
-            }
-
-            this.step = this.job.action.actions[this.stepOrder];
-            let oldStepStatus = this.stepStatus;
-            this.stepStatus = this.job.step_status[this.stepOrder];
-
-            if (this.currentNodeJobRunID !== nrj.id) {
-                this.currentNodeJobRunID = nrj.id;
-
-                this.computeDuration();
-                this.showLogs = false;
-                if (this.stepStatus.status === this.pipelineBuildStatusEnum.BUILDING ||
-                    this.stepStatus.status === this.pipelineBuildStatusEnum.WAITING ||
-                    (this.stepStatus.status === this.pipelineBuildStatusEnum.FAIL && !this.step.optional)) {
-                    this.showLogs = true;
-                    this.initWorker();
-                }
-
-                this._cd.markForCheck();
-
-                return;
-            }
-
-            // check if step status change
-            if (this.stepStatus.status === oldStepStatus.status) {
-                return;
-            }
-
-            if (!oldStepStatus) {
-                this.computeDuration();
-                this.initWorker();
-                this.showLogs = true;
-            } else if (this.pipelineBuildStatusEnum.isActive(this.stepStatus.status) &&
-                this.pipelineBuildStatusEnum.isDone(status)) {
-                this.showLogs = false;
-            }
-
-            this._cd.markForCheck();
-        });
+        let njr = this._store.selectSnapshot(WorkflowState.getSelectedWorkflowNodeJobRun());
+        this.onNodeJobRunChange(njr);
 
         this.queryParamsSubscription = this._route.queryParams.subscribe((qps) => {
             if (!this.job) {
@@ -158,26 +109,84 @@ export class WorkflowStepLogComponent implements OnInit, OnDestroy {
         });
     }
 
+    onNodeJobRunChange(njr: WorkflowNodeJobRun) {
+        if (!njr || !njr.job.step_status) {
+            return;
+        }
+
+        this.job = njr.job;
+
+        let invalidStepOrder = !(this.stepOrder < this.job.action.actions.length) || !(this.stepOrder < this.job.step_status.length);
+        if (invalidStepOrder) {
+            return;
+        }
+
+        this.step = this.job.action.actions[this.stepOrder];
+        let oldStepStatus = this.stepStatus;
+        this.stepStatus = this.job.step_status[this.stepOrder];
+
+        if (this.currentNodeJobRunID !== njr.id) {
+            this.currentNodeJobRunID = njr.id;
+
+            this.computeDuration();
+            this.showLogs = false;
+            if (this.stepStatus.status === this.pipelineBuildStatusEnum.BUILDING ||
+                this.stepStatus.status === this.pipelineBuildStatusEnum.WAITING ||
+                (this.stepStatus.status === this.pipelineBuildStatusEnum.FAIL && !this.step.optional)) {
+                this.showLogs = true;
+                this.initWorker();
+            }
+
+            this._cd.markForCheck();
+
+            return;
+        }
+
+        // check if step status change
+        if (this.stepStatus.status === oldStepStatus.status) {
+            return;
+        }
+
+        if (!oldStepStatus) {
+            this.computeDuration();
+            this.initWorker();
+            this.showLogs = true;
+        } else if (this.pipelineBuildStatusEnum.isActive(this.stepStatus.status) &&
+            this.pipelineBuildStatusEnum.isDone(status)) {
+            this.showLogs = false;
+        }
+
+        this._cd.markForCheck();
+    }
+
     copyRawLog() {
         this.logsElt.nativeElement.value = this.logs.val;
         this.logsElt.nativeElement.select();
         document.execCommand('copy');
     }
 
-    initWorker(): void {
+    async initWorker() {
         if (!this.logs) {
             this.loading = true;
         }
 
         let projectKey = this._store.selectSnapshot(ProjectState.projectSnapshot).key;
         let workflowName = this._store.selectSnapshot(WorkflowState.workflowSnapshot).name;
-        let runNumber = (<WorkflowStateModel>this._store.selectSnapshot(WorkflowState)).workflowNodeRun.num;
         let nodeRunId = (<WorkflowStateModel>this._store.selectSnapshot(WorkflowState)).workflowNodeRun.id;
         let runJobId = this.currentNodeJobRunID;
         if (!this.job.step_status) {
             return;
         }
         let stepOrder = this.stepOrder < this.job.step_status.length ? this.stepOrder : this.job.step_status.length - 1;
+
+        const cdnEnabled = !!this._store.selectSnapshot(FeatureState.feature('cdn-job-logs')).find(f => {
+            return !!f.results.find(r => r.enabled && r.paramString === JSON.stringify({ 'project_key': projectKey }));
+        });
+
+        let logLink: CDNLogLink;
+        if (cdnEnabled) {
+            logLink = await this._workflowService.getStepLink(projectKey, workflowName, nodeRunId, runJobId, stepOrder).toPromise();
+        }
 
         let callback = (b: BuildResult) => {
             if (b.step_logs.id) {
@@ -188,9 +197,17 @@ export class WorkflowStepLogComponent implements OnInit, OnDestroy {
                 this.loading = false;
                 this.focusToLine();
             }
+            this._cd.markForCheck();
         };
 
-        this._workflowService.getStepLog(projectKey, workflowName, runNumber, nodeRunId, runJobId, stepOrder).subscribe(callback);
+        if (!cdnEnabled) {
+            const stepLog = await this._workflowService.getStepLog(projectKey, workflowName,
+                nodeRunId, runJobId, stepOrder).toPromise();
+            callback(stepLog);
+        } else {
+            const data = await this._workflowService.getLogDownload(logLink).toPromise();
+            callback(<BuildResult>{ status: PipelineStatus.BUILDING, step_logs: { id: 1, val: data } });
+        }
 
         if (!PipelineStatus.isActive(this.stepStatus.status)) {
             return;
@@ -199,7 +216,13 @@ export class WorkflowStepLogComponent implements OnInit, OnDestroy {
         this.stopWorker();
         this._ngZone.runOutsideAngular(() => {
             this.pollingSubscription = Observable.interval(2000)
-                .mergeMap(_ => this._workflowService.getStepLog(projectKey, workflowName, runNumber, nodeRunId, runJobId, stepOrder))
+                .mergeMap(_ => {
+                    if (!cdnEnabled) {
+                        return this._workflowService.getStepLog(projectKey, workflowName, nodeRunId, runJobId, stepOrder);
+                    }
+                    return this._workflowService.getLogDownload(logLink)
+                        .map(data => <BuildResult>{ status: PipelineStatus.BUILDING, step_logs: { id: 1, val: data } });
+                })
                 .subscribe(build => {
                     this._ngZone.run(() => {
                         callback(build);
@@ -209,6 +232,10 @@ export class WorkflowStepLogComponent implements OnInit, OnDestroy {
                     });
                 });
         });
+    }
+
+    trackElement(index: number, element: { lineNumber: number, value: string }) {
+        return element ? element.lineNumber : null
     }
 
     stopWorker() {
@@ -269,7 +296,6 @@ export class WorkflowStepLogComponent implements OnInit, OnDestroy {
             this.limitTo = this.splittedLogs.length - 40;
             this.splittedLogsToDisplay.splice(this.limitFrom, this.limitTo - this.limitFrom);
         }
-        this._cd.markForCheck();
     }
 
     focusToLine() {
@@ -302,7 +328,7 @@ export class WorkflowStepLogComponent implements OnInit, OnDestroy {
         }
 
         if (this.doneExec) {
-            this.duration = '(' + this._durationService.duration(this.startExec, this.doneExec) + ')';
+            this.duration = '(' + DurationService.duration(this.startExec, this.doneExec) + ')';
         }
     }
 

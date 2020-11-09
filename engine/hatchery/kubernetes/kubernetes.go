@@ -33,6 +33,7 @@ import (
 // New instanciates a new hatchery local
 func New() *HatcheryKubernetes {
 	s := new(HatcheryKubernetes)
+	s.GoRoutines = sdk.NewGoRoutines()
 	s.Router = &api.Router{
 		Mux: mux.NewRouter(),
 	}
@@ -46,7 +47,7 @@ func (h *HatcheryKubernetes) InitHatchery(ctx context.Context) error {
 	if err := h.Common.RefreshServiceLogger(ctx); err != nil {
 		log.Error(ctx, "hatchery> kubernetes> cannot get cdn configuration : %v", err)
 	}
-	sdk.GoRoutine(context.Background(), "hatchery kubernetes routines", func(ctx context.Context) {
+	h.GoRoutines.Run(context.Background(), "hatchery kubernetes routines", func(ctx context.Context) {
 		h.routines(ctx)
 	})
 	return nil
@@ -153,9 +154,9 @@ func (h *HatcheryKubernetes) ApplyConfiguration(cfg interface{}) error {
 }
 
 // Status returns sdk.MonitoringStatus, implements interface service.Service
-func (h *HatcheryKubernetes) Status(ctx context.Context) sdk.MonitoringStatus {
-	m := h.CommonMonitoring()
-	m.Lines = append(m.Lines, sdk.MonitoringStatusLine{Component: "Workers", Value: fmt.Sprintf("%d/%d", len(h.WorkersStarted(ctx)), h.Config.Provision.MaxWorker), Status: sdk.MonitoringStatusOK})
+func (h *HatcheryKubernetes) Status(ctx context.Context) *sdk.MonitoringStatus {
+	m := h.NewMonitoringStatus()
+	m.AddLine(sdk.MonitoringStatusLine{Component: "Workers", Value: fmt.Sprintf("%d/%d", len(h.WorkersStarted(ctx)), h.Config.Provision.MaxWorker), Status: sdk.MonitoringStatusOK})
 
 	return m
 }
@@ -331,6 +332,11 @@ func (h *HatcheryKubernetes) SpawnWorker(ctx context.Context, spawnArgs hatchery
 		i++
 	}
 
+	pullPolicy := "IfNotPresent"
+	if strings.HasSuffix(spawnArgs.Model.ModelDocker.Image, ":latest") {
+		pullPolicy = "Always"
+	}
+
 	var gracePeriodSecs int64
 	podSchema := apiv1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -348,11 +354,12 @@ func (h *HatcheryKubernetes) SpawnWorker(ctx context.Context, spawnArgs hatchery
 			TerminationGracePeriodSeconds: &gracePeriodSecs,
 			Containers: []apiv1.Container{
 				{
-					Name:    spawnArgs.WorkerName,
-					Image:   spawnArgs.Model.ModelDocker.Image,
-					Env:     envs,
-					Command: strings.Fields(spawnArgs.Model.ModelDocker.Shell),
-					Args:    []string{cmd},
+					Name:            spawnArgs.WorkerName,
+					Image:           spawnArgs.Model.ModelDocker.Image,
+					ImagePullPolicy: apiv1.PullPolicy(pullPolicy),
+					Env:             envs,
+					Command:         strings.Fields(spawnArgs.Model.ModelDocker.Shell),
+					Args:            []string{cmd},
 					Resources: apiv1.ResourceRequirements{
 						Requests: apiv1.ResourceList{
 							apiv1.ResourceMemory: resource.MustParse(fmt.Sprintf("%d", memory)),
@@ -422,8 +429,15 @@ func (h *HatcheryKubernetes) SpawnWorker(ctx context.Context, spawnArgs hatchery
 			}
 		}
 
-		podSchema.ObjectMeta.Labels[LABEL_SERVICE_JOB_ID] = fmt.Sprintf("%d", spawnArgs.JobID)
-		podSchema.ObjectMeta.Labels[LABEL_SERVICE_NODE_RUN_ID] = fmt.Sprintf("%d", spawnArgs.NodeRunID)
+		podSchema.ObjectMeta.Labels[hatchery.LabelServiceJobID] = fmt.Sprintf("%d", spawnArgs.JobID)
+		podSchema.ObjectMeta.Labels[hatchery.LabelServiceNodeRunID] = fmt.Sprintf("%d", spawnArgs.NodeRunID)
+		podSchema.ObjectMeta.Labels[hatchery.LabelServiceProjectKey] = spawnArgs.ProjectKey
+		podSchema.ObjectMeta.Labels[hatchery.LabelServiceWorkflowName] = spawnArgs.WorkflowName
+		podSchema.ObjectMeta.Labels[hatchery.LabelServiceWorkflowID] = fmt.Sprintf("%d", spawnArgs.WorkflowID)
+		podSchema.ObjectMeta.Labels[hatchery.LabelServiceRunID] = fmt.Sprintf("%d", spawnArgs.RunID)
+		podSchema.ObjectMeta.Labels[hatchery.LabelServiceNodeRunName] = spawnArgs.NodeRunName
+		podSchema.ObjectMeta.Labels[hatchery.LabelServiceJobName] = spawnArgs.JobName
+
 		podSchema.Spec.Containers = append(podSchema.Spec.Containers, servContainer)
 		podSchema.Spec.HostAliases[0].Hostnames[i+1] = strings.ToLower(serv.Name)
 	}
@@ -491,23 +505,23 @@ func (h *HatcheryKubernetes) routines(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			sdk.GoRoutine(ctx, "getCDNConfiguration", func(ctx context.Context) {
+			h.GoRoutines.Exec(ctx, "getCDNConfiguration", func(ctx context.Context) {
 				if err := h.Common.RefreshServiceLogger(ctx); err != nil {
 					log.Error(ctx, "hatchery> kubernetes> cannot get cdn configuration : %v", err)
 				}
 			})
 
-			sdk.GoRoutine(ctx, "getServicesLogs", func(ctx context.Context) {
+			h.GoRoutines.Exec(ctx, "getServicesLogs", func(ctx context.Context) {
 				if err := h.getServicesLogs(ctx); err != nil {
 					log.Error(ctx, "Hatchery> Kubernetes> Cannot get service logs : %v", err)
 				}
 			})
 
-			sdk.GoRoutine(ctx, "killAwolWorker", func(ctx context.Context) {
+			h.GoRoutines.Exec(ctx, "killAwolWorker", func(ctx context.Context) {
 				_ = h.killAwolWorkers(ctx)
 			})
 
-			sdk.GoRoutine(ctx, "deleteSecrets", func(ctx context.Context) {
+			h.GoRoutines.Exec(ctx, "deleteSecrets", func(ctx context.Context) {
 				if err := h.deleteSecrets(ctx); err != nil {
 					log.Error(ctx, "hatchery> kubernetes> cannot handle secrets : %v", err)
 				}

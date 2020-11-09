@@ -108,7 +108,7 @@ func (api *API) updateAsCodePipelineHandler() service.Handler {
 			return sdk.WithStack(err)
 		}
 
-		sdk.GoRoutine(context.Background(), fmt.Sprintf("UpdateAsCodePipelineHandler-%s", ope.UUID), func(ctx context.Context) {
+		api.GoRoutines.Exec(context.Background(), fmt.Sprintf("UpdateAsCodePipelineHandler-%s", ope.UUID), func(ctx context.Context) {
 			ed := ascode.EntityData{
 				FromRepo:      pipelineDB.FromRepository,
 				Type:          ascode.PipelineEvent,
@@ -116,7 +116,7 @@ func (api *API) updateAsCodePipelineHandler() service.Handler {
 				Name:          pipelineDB.Name,
 				OperationUUID: ope.UUID,
 			}
-			ascode.UpdateAsCodeResult(ctx, api.mustDB(), api.Cache, *proj, *wkHolder, *rootApp, ed, u)
+			ascode.UpdateAsCodeResult(ctx, api.mustDB(), api.Cache, api.GoRoutines, *proj, *wkHolder, *rootApp, ed, u)
 		}, api.PanicDump())
 
 		return service.WriteJSON(w, sdk.Operation{
@@ -319,8 +319,8 @@ func (api *API) getPipelineHandler() service.Handler {
 		vars := mux.Vars(r)
 		projectKey := vars[permProjectKey]
 		pipelineName := vars["pipelineKey"]
-		withWorkflows := FormBool(r, "withWorkflows")
-		withAsCodeEvent := FormBool(r, "withAsCodeEvents")
+		withWorkflows := service.FormBool(r, "withWorkflows")
+		withAsCodeEvent := service.FormBool(r, "withAsCodeEvents")
 
 		p, err := pipeline.LoadPipeline(ctx, api.mustDB(), projectKey, pipelineName, true)
 		if err != nil {

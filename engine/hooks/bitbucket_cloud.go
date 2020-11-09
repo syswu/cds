@@ -50,10 +50,9 @@ func (s *Service) generatePayloadFromBitbucketCloudRequest(ctx context.Context, 
 		}
 
 		getVariableFromBitbucketCloudChange(ctx, payloadChange, pushChange)
-
 		payloads = append(payloads, payloadChange)
-
 	}
+
 	return payloads, nil
 }
 
@@ -61,20 +60,15 @@ func getVariableFromBitbucketCloudChange(ctx context.Context, payload map[string
 	if change.New.Type == "branch" {
 		branch := strings.TrimPrefix(change.New.Name, "refs/heads/")
 		payload[GIT_BRANCH] = branch
-
 	} else if change.New.Type == "tag" {
 		payload[GIT_TAG] = strings.TrimPrefix(change.New.Name, "refs/tags/")
 	} else {
-		log.Warning(ctx, "Uknown push type: %s", change.New.Type)
+		log.Warning(ctx, "unknown push type: %s", change.New.Type)
 		return
 	}
 	payload[GIT_HASH_BEFORE] = change.Old.Target.Hash
 	payload[GIT_HASH] = change.New.Target.Hash
-	hashShort := change.New.Target.Hash
-	if len(hashShort) >= 7 {
-		hashShort = hashShort[:7]
-	}
-	payload[GIT_HASH_SHORT] = hashShort
+	payload[GIT_HASH_SHORT] = sdk.StringFirstN(change.New.Target.Hash, 7)
 }
 
 func getVariableFromBitbucketCloudRepository(payload map[string]interface{}, repo *BitbucketCloudRepository) {

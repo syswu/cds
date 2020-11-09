@@ -92,12 +92,19 @@ func (api *API) postServiceRegisterHandler() service.Handler {
 		if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
 			return err
 		}
-		if srv != nil && !(srv.Type == data.Type) {
+		exists := srv != nil
+
+		if exists && srv.Type != data.Type {
 			return sdk.WrapError(sdk.ErrForbidden, "cannot register service %s of type %s for consumer %s while existing service type is different", data.Name, data.Type, consumer.ID)
 		}
 
 		// Update or create the service
-		if srv != nil {
+
+		var sessionID string
+		if a := getAuthSession(ctx); a != nil {
+			sessionID = a.ID
+		}
+		if exists {
 			srv.Update(data)
 			if err := services.Update(ctx, tx, srv); err != nil {
 				return err
@@ -106,10 +113,15 @@ func (api *API) postServiceRegisterHandler() service.Handler {
 		} else {
 			srv = &data
 			srv.ConsumerID = &consumer.ID
+
 			if err := services.Insert(ctx, tx, srv); err != nil {
 				return sdk.WithStack(err)
 			}
 			log.Debug("postServiceRegisterHandler> insert new service %s(%d) registered for consumer %s", srv.Name, srv.ID, *srv.ConsumerID)
+		}
+
+		if err := services.UpsertStatus(tx, *srv, sessionID); err != nil {
+			return sdk.WithStack(err)
 		}
 
 		if len(srv.PublicKey) > 0 {
@@ -171,7 +183,15 @@ func (api *API) postServiceHearbeatHandler() service.Handler {
 		s.LastHeartbeat = time.Now()
 		s.MonitoringStatus = mon
 
+		var sessionID string
+		if a := getAuthSession(ctx); a != nil {
+			sessionID = a.ID
+		}
 		if err := services.Update(ctx, tx, s); err != nil {
+			return err
+		}
+
+		if err := services.UpsertStatus(tx, *s, sessionID); err != nil {
 			return err
 		}
 
@@ -220,19 +240,28 @@ func (api *API) serviceAPIHeartbeatUpdate(ctx context.Context, db *gorp.DbMap) {
 			Type:   sdk.TypeAPI,
 			Config: srvConfig,
 		},
-		MonitoringStatus: api.Status(ctx),
+		MonitoringStatus: *api.Status(ctx),
 		LastHeartbeat:    time.Now(),
 	}
 
-	//Try to find the service, and keep; else generate a new one
-	oldSrv, errOldSrv := services.LoadByName(ctx, tx, srv.Name)
-	if errOldSrv != nil && !sdk.ErrorIs(errOldSrv, sdk.ErrNotFound) {
-		log.Error(ctx, "serviceAPIHeartbeat> Unable to find by name:%v", errOldSrv)
+	old, err := services.LoadByName(ctx, tx, srv.Name)
+	if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+		log.Error(ctx, "serviceAPIHeartbeat> Unable to find service by name: %v", err)
+		return
+	}
+	exists := old != nil
+
+	if exists && old.ConsumerID != nil {
+		log.Error(ctx, "serviceAPIHeartbeat> Can't save an api service as one service already exists for given name %s", srv.Name)
 		return
 	}
 
-	if oldSrv != nil {
-		srv.ID = oldSrv.ID
+	var authSessionID string
+	if a := getAuthSession(ctx); a != nil {
+		authSessionID = a.ID
+	}
+	if exists {
+		srv.ID = old.ID
 		if err := services.Update(ctx, tx, srv); err != nil {
 			log.Error(ctx, "serviceAPIHeartbeat> Unable to update service %s: %v", srv.Name, err)
 			return
@@ -244,8 +273,13 @@ func (api *API) serviceAPIHeartbeatUpdate(ctx context.Context, db *gorp.DbMap) {
 		}
 	}
 
+	if err := services.UpsertStatus(tx, *srv, authSessionID); err != nil {
+		log.Error(ctx, "serviceAPIHeartbeat> Unable to insert or update monitoring status %s: %v", srv.Name, err)
+		return
+	}
+
 	if err := tx.Commit(); err != nil {
-		log.Error(ctx, "serviceAPIHeartbeat> error on repo.Commit: %v", err)
+		log.Error(ctx, "serviceAPIHeartbeat> error tx commit: %v", err)
 		return
 	}
 }

@@ -27,6 +27,7 @@ import (
 // New returns a new service
 func New() *Service {
 	s := new(Service)
+	s.GoRoutines = sdk.NewGoRoutines()
 	s.Router = &api.Router{
 		Mux: mux.NewRouter(),
 	}
@@ -66,6 +67,7 @@ func (s *Service) ApplyConfiguration(config interface{}) error {
 	// HTMLDir must contains the ui dist directory.
 	// ui.tar.gz contains the dist directory
 	s.HTMLDir = filepath.Join(s.Cfg.Staticdir, "dist")
+	s.DocsDir = filepath.Join(s.Cfg.Staticdir, "docs")
 	s.Cfg.BaseURL = strings.TrimSpace(s.Cfg.BaseURL)
 	if s.Cfg.BaseURL == "" { // s.Cfg.BaseURL could not be empty
 		s.Cfg.BaseURL = "/"
@@ -92,7 +94,7 @@ func (s *Service) CheckConfiguration(config interface{}) error {
 }
 
 // Serve will start the http ui server
-func (s *Service) Serve(ctx context.Context) error {
+func (s *Service) BeforeStart(ctx context.Context) error {
 	log.Info(ctx, "ui> Starting service %s %s...", s.Cfg.Name, sdk.VERSION)
 	s.StartupTime = time.Now()
 
@@ -119,7 +121,7 @@ func (s *Service) Serve(ctx context.Context) error {
 
 	//Init the http server
 	s.initRouter(ctx)
-	server := &http.Server{
+	s.Server = &http.Server{
 		Addr:           fmt.Sprintf("%s:%d", s.Cfg.HTTP.Addr, s.Cfg.HTTP.Port),
 		Handler:        s.Router.Mux,
 		ReadTimeout:    10 * time.Minute,
@@ -128,15 +130,21 @@ func (s *Service) Serve(ctx context.Context) error {
 	}
 
 	// Start the http server
-	log.Info(ctx, "ui> Starting HTTP Server on port %d", s.Cfg.HTTP.Port)
-	if err := server.ListenAndServe(); err != nil {
-		log.Error(ctx, "ui> Listen and serve failed: %s", err)
-	}
+	s.GoRoutines.Run(ctx, "ui-http-serve", func(ctx context.Context) {
+		log.Info(ctx, "ui> Starting HTTP Server on port %d", s.Cfg.HTTP.Port)
+		if err := s.Server.ListenAndServe(); err != nil {
+			log.Error(ctx, "ui> Listen and serve failed: %s", err)
+		}
+	})
 
+	return nil
+}
+
+func (s *Service) Serve(ctx context.Context) error {
 	// Gracefully shutdown the http server
 	<-ctx.Done()
 	log.Info(ctx, "ui> Shutdown HTTP Server")
-	if err := server.Shutdown(ctx); err != nil {
+	if err := s.Server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("unable to shutdown server: %v", err)
 	}
 
@@ -257,7 +265,7 @@ func (s *Service) askForGettingStaticFiles(ctx context.Context, version string) 
 
 	opts = append(opts, answerDoNothing)
 
-	ask := fmt.Sprintf("What do you want to do?")
+	ask := "What do you want to do?"
 
 	selected := cli.AskChoice(ask, opts...)
 

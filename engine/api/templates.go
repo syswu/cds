@@ -12,7 +12,6 @@ import (
 	"strconv"
 
 	"github.com/gorilla/mux"
-	"github.com/sirupsen/logrus"
 
 	"github.com/ovh/cds/engine/api/application"
 	"github.com/ovh/cds/engine/api/ascode"
@@ -325,7 +324,7 @@ func (api *API) postTemplateApplyHandler() service.Handler {
 			return err
 		}
 
-		withImport := FormBool(r, "import")
+		withImport := service.FormBool(r, "import")
 		branch := FormString(r, "branch")
 		message := FormString(r, "message")
 
@@ -386,7 +385,7 @@ func (api *API) postTemplateApplyHandler() service.Handler {
 			if err := exportentities.TarWorkflowComponents(ctx, data, buf); err != nil {
 				return err
 			}
-			return service.Write(w, buf.Bytes(), http.StatusOK, "application/tar")
+			return service.Write(w, buf, http.StatusOK, "application/tar")
 		}
 
 		// In case we want to generated a workflow not detached from the template, we need to check if the template
@@ -433,7 +432,7 @@ func (api *API) postTemplateApplyHandler() service.Handler {
 						return sdk.WithStack(err)
 					}
 
-					sdk.GoRoutine(context.Background(), fmt.Sprintf("UpdateAsCodeResult-%s", ope.UUID), func(ctx context.Context) {
+					api.GoRoutines.Exec(context.Background(), fmt.Sprintf("UpdateAsCodeResult-%s", ope.UUID), func(ctx context.Context) {
 						ed := ascode.EntityData{
 							Name:          existingWorkflow.Name,
 							ID:            existingWorkflow.ID,
@@ -441,7 +440,7 @@ func (api *API) postTemplateApplyHandler() service.Handler {
 							FromRepo:      existingWorkflow.FromRepository,
 							OperationUUID: ope.UUID,
 						}
-						ascode.UpdateAsCodeResult(ctx, api.mustDB(), api.Cache, *p, *existingWorkflow, *rootApp, ed, consumer)
+						ascode.UpdateAsCodeResult(ctx, api.mustDB(), api.Cache, api.GoRoutines, *p, *existingWorkflow, *rootApp, ed, consumer)
 					}, api.PanicDump())
 
 					return service.WriteJSON(w, sdk.Operation{
@@ -470,7 +469,7 @@ func (api *API) postTemplateApplyHandler() service.Handler {
 			if err := exportentities.TarWorkflowComponents(ctx, data, buf); err != nil {
 				return err
 			}
-			return service.Write(w, buf.Bytes(), http.StatusOK, "application/tar")
+			return service.Write(w, buf, http.StatusOK, "application/tar")
 		}
 
 		msgs, wkf, oldWkf, _, err := workflow.Push(ctx, api.mustDB(), api.Cache, p, data, nil, consumer, project.DecryptWithBuiltinKey)
@@ -569,7 +568,7 @@ func (api *API) postTemplateBulkHandler() service.Handler {
 		}
 
 		// start async bulk tasks
-		sdk.GoRoutine(context.Background(), "api.templateBulkApply", func(ctx context.Context) {
+		api.GoRoutines.Exec(context.Background(), "api.templateBulkApply", func(ctx context.Context) {
 			for i := range bulk.Operations {
 				if bulk.Operations[i].Status == sdk.OperationStatusPending {
 					bulk.Operations[i].Status = sdk.OperationStatusProcessing
@@ -581,7 +580,7 @@ func (api *API) postTemplateBulkHandler() service.Handler {
 					errorDefer := func(err error) error {
 						if err != nil {
 							err = sdk.WrapError(err, "error occurred in template bulk with id %d", bulk.ID)
-							log.ErrorWithFields(ctx, logrus.Fields{
+							log.ErrorWithFields(ctx, log.Fields{
 								"stack_trace": fmt.Sprintf("%+v", err),
 							}, "%s", err)
 							bulk.Operations[i].Status = sdk.OperationStatusError
@@ -700,7 +699,7 @@ func (api *API) postTemplateBulkHandler() service.Handler {
 								FromRepo:      existingWorkflow.FromRepository,
 								OperationUUID: ope.UUID,
 							}
-							ascode.UpdateAsCodeResult(ctx, api.mustDB(), api.Cache, *p, *existingWorkflow, *rootApp, ed, consumer)
+							ascode.UpdateAsCodeResult(ctx, api.mustDB(), api.Cache, api.GoRoutines, *p, *existingWorkflow, *rootApp, ed, consumer)
 
 							bulk.Operations[i].Status = sdk.OperationStatusDone
 							if err := workflowtemplate.UpdateBulk(api.mustDB(), &bulk); err != nil {

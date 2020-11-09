@@ -9,7 +9,7 @@ import (
 
 	"github.com/gorhill/cronexpr"
 
-	"github.com/ovh/cds/engine/api/cache"
+	"github.com/ovh/cds/engine/cache"
 	"github.com/ovh/cds/sdk"
 	"github.com/ovh/cds/sdk/log"
 )
@@ -137,11 +137,25 @@ func (s *Service) initGerritStreamEvent(ctx context.Context, vcsName string, vcs
 	// Create channel to store gerrit event
 	gerritEventChan := make(chan GerritEvent, 20)
 	// Listen to gerrit event stream
-	sdk.GoRoutine(ctx, "gerrit.EventStream."+vcsName, func(ctx context.Context) {
-		ListenGerritStreamEvent(ctx, s.Cache, vcsConfig[vcsName], gerritEventChan)
+	s.GoRoutines.Run(ctx, "gerrit.EventStream."+vcsName, func(ctx context.Context) {
+		for {
+			select {
+			case <-ctx.Done():
+				if ctx.Err() != nil {
+					log.Error(ctx, "hook:initGerritStreamEvent: %v", ctx.Err())
+				}
+				return
+			default:
+				if err := ListenGerritStreamEvent(ctx, s.Cache, s.GoRoutines, vcsConfig[vcsName], gerritEventChan); err != nil {
+					log.Error(ctx, "hook:initGerritStreamEvent: failed listening gerrit event stream: %v", err)
+				}
+				time.Sleep(10 * time.Second)
+			}
+		}
+
 	})
 	// Listen to gerrit event stream
-	sdk.GoRoutine(ctx, "gerrit.EventStreamCompute."+vcsName, func(ctx context.Context) {
+	s.GoRoutines.Run(ctx, "gerrit.EventStreamCompute."+vcsName, func(ctx context.Context) {
 		s.ComputeGerritStreamEvent(ctx, vcsName, gerritEventChan)
 	})
 	// Save the fact that we are listen the event stream for this gerrit

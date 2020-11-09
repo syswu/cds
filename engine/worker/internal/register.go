@@ -11,7 +11,7 @@ import (
 // Workers need to register to main api so they can run actions
 func (w *CurrentWorker) Register(ctx context.Context) error {
 	var form sdk.WorkerRegistrationForm
-	log.Info(ctx, "Registering with Token %s on %s", w.register.token[:12], w.register.apiEndpoint)
+	log.Info(ctx, "Registering with Token %s on %s", sdk.StringFirstN(w.register.token, 12), w.register.apiEndpoint)
 
 	requirements, errR := w.client.Requirements()
 	if errR != nil {
@@ -70,7 +70,7 @@ func (w *CurrentWorker) Unregister(ctx context.Context) error {
 	return nil
 }
 
-// LoopPath return the list of evailable command in path
+// LoopPath returns the list of available binaries in path
 func LoopPath(w *CurrentWorker, reqs []sdk.Requirement) []string {
 	binaries := []string{}
 	for _, req := range reqs {

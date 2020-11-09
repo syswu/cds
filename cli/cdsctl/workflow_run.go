@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -90,14 +91,14 @@ var workflowRunManualCmd = cli.Command{
 
 func workflowRunManualRun(v cli.Values) error {
 	if v.GetBool("sync") && v.GetString("run-number") == "" {
-		return fmt.Errorf("Could not use flag --sync without flag --run-number")
+		return fmt.Errorf("could not use flag --sync without flag --run-number")
 	}
 
 	manual := sdk.WorkflowNodeRunManual{}
 	if strings.TrimSpace(v.GetString("data")) != "" {
 		data := map[string]interface{}{}
 		if err := json.Unmarshal([]byte(v.GetString("data")), &data); err != nil {
-			return fmt.Errorf("Error payload isn't a valid json")
+			return fmt.Errorf("error payload isn't a valid json")
 		}
 		manual.Payload = data
 	} else {
@@ -106,10 +107,11 @@ func workflowRunManualRun(v cli.Values) error {
 			return fmt.Errorf("Unable to get current path: %s", err)
 		}
 		var gitBranch, currentBranch, remoteURL string
-		r, err := repo.New(dir)
+		ctx := context.Background()
+		r, err := repo.New(ctx, dir)
 		if err == nil { // If the directory is a git repository
-			currentBranch, _ = r.CurrentBranch()
-			remoteURL, err = r.FetchURL()
+			currentBranch, _ = r.CurrentBranch(ctx)
+			remoteURL, err = r.FetchURL(ctx)
 			if err != nil {
 				return sdk.WrapError(err, "cannot fetch the remote url")
 			}

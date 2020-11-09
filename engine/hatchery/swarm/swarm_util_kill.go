@@ -7,6 +7,7 @@ import (
 	"time"
 
 	types "github.com/docker/docker/api/types"
+	"github.com/sirupsen/logrus"
 	context "golang.org/x/net/context"
 
 	"github.com/ovh/cds/sdk"
@@ -19,7 +20,7 @@ const (
 	docker0 = "docker0"
 )
 
-func (h *HatcherySwarm) killAndRemove(ctx context.Context, dockerClient *dockerClient, ID string) error {
+func (h *HatcherySwarm) killAndRemove(ctx context.Context, dockerClient *dockerClient, ID string, containers []types.Container) error {
 	ctxList, cancelList := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancelList()
 	container, err := dockerClient.ContainerInspect(ctxList, ID)
@@ -74,7 +75,7 @@ func (h *HatcherySwarm) killAndRemove(ctx context.Context, dockerClient *dockerC
 	}
 
 	if err := h.killAndRemoveContainer(ctx, dockerClient, ID); err != nil {
-		return sdk.WrapError(err, "%s on %s", ID[:7], dockerClient.name)
+		return sdk.WrapError(err, "%s on %s", sdk.StringFirstN(ID, 7), dockerClient.name)
 	}
 
 	//If there is no network settings, stop here
@@ -89,7 +90,7 @@ func (h *HatcherySwarm) killAndRemove(ctx context.Context, dockerClient *dockerC
 		network, err := dockerClient.NetworkInspect(ctxList, cnetwork.NetworkID, types.NetworkInspectOptions{})
 		if err != nil {
 			if !strings.Contains(err.Error(), "No such network") {
-				return sdk.WrapError(err, "unable to get network for %s on %s", ID[:7], dockerClient.name)
+				return sdk.WrapError(err, "unable to get network for %s on %s", sdk.StringFirstN(ID, 7), dockerClient.name)
 			}
 			continue
 		}
@@ -103,8 +104,42 @@ func (h *HatcherySwarm) killAndRemove(ctx context.Context, dockerClient *dockerC
 		if netname, ok := network.Labels["worker_net"]; ok {
 			log.Debug("hatchery> swarm> killAndRemove> Remove network %s", netname)
 			for id := range network.Containers {
+
+				c := h.getContainer(containers, id)
+				if c != nil {
+					// Send final logs before deleting service container
+					jobIdentifiers := h.GetIdentifiersFromLabels(*c)
+					if jobIdentifiers == nil {
+						log.Error(ctx, "killAwolWorker> unable to get identifiers from containers labels")
+						continue
+					}
+					endLog := log.Message{
+						Level: logrus.InfoLevel,
+						Value: string("End of Job"),
+						Signature: log.Signature{
+							Service: &log.SignatureService{
+								HatcheryID:      h.Service().ID,
+								HatcheryName:    h.ServiceName(),
+								RequirementID:   jobIdentifiers.ServiceID,
+								RequirementName: c.Labels[hatchery.LabelServiceReqName],
+								WorkerName:      c.Labels["service_worker"],
+							},
+							ProjectKey:   c.Labels[hatchery.LabelServiceProjectKey],
+							WorkflowName: c.Labels[hatchery.LabelServiceWorkflowName],
+							WorkflowID:   jobIdentifiers.WorkflowID,
+							RunID:        jobIdentifiers.RunID,
+							NodeRunName:  c.Labels[hatchery.LabelServiceNodeRunName],
+							JobName:      c.Labels[hatchery.LabelServiceJobName],
+							JobID:        jobIdentifiers.JobID,
+							NodeRunID:    jobIdentifiers.NodeRunID,
+							Timestamp:    time.Now().UnixNano(),
+						},
+					}
+					h.Common.SendServiceLog(ctx, []log.Message{endLog}, sdk.StatusTerminated)
+				}
+
 				if err := h.killAndRemoveContainer(ctx, dockerClient, id); err != nil {
-					log.Error(ctx, "hatchery> swarm> killAndRemove> unable to kill and remove container %s on %s err:%s", id[:12], dockerClient.name, err)
+					log.Error(ctx, "hatchery> swarm> killAndRemove> unable to kill and remove container %s on %s err:%s", sdk.StringFirstN(id, 12), dockerClient.name, err)
 				}
 			}
 		}
@@ -114,7 +149,7 @@ func (h *HatcherySwarm) killAndRemove(ctx context.Context, dockerClient *dockerC
 		ctxDocker, cancelList := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancelList()
 		if err := dockerClient.NetworkRemove(ctxDocker, network.ID); err != nil {
-			log.Error(ctx, "hatchery> swarm> killAndRemove> unable to kill and remove network %s from %s err:%s", network.ID[:12], dockerClient.name, err)
+			log.Error(ctx, "hatchery> swarm> killAndRemove> unable to kill and remove network %s from %s err:%s", sdk.StringFirstN(network.ID, 12), dockerClient.name, err)
 		}
 	}
 	return nil

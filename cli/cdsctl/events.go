@@ -11,8 +11,9 @@ import (
 )
 
 var eventsCmd = cli.Command{
-	Name:  "events",
-	Short: "Listen CDS Events",
+	Name:    "events",
+	Aliases: []string{"event"},
+	Short:   "Listen CDS Events",
 }
 
 func events() *cobra.Command {
@@ -57,9 +58,10 @@ func eventsListenRun(v cli.Values) error {
 	ctx := context.Background()
 	chanMessageReceived := make(chan sdk.WebsocketEvent)
 	chanMessageToSend := make(chan []sdk.WebsocketFilter)
+	chanErrorReceived := make(chan error)
 
-	sdk.GoRoutine(ctx, "WebsocketEventsListenCmd", func(ctx context.Context) {
-		client.WebsocketEventsListen(ctx, chanMessageToSend, chanMessageReceived)
+	sdk.NewGoRoutines().Run(ctx, "WebsocketEventsListenCmd", func(ctx context.Context) {
+		client.WebsocketEventsListen(ctx, sdk.NewGoRoutines(), chanMessageToSend, chanMessageReceived, chanErrorReceived)
 	})
 
 	switch {
@@ -90,6 +92,8 @@ func eventsListenRun(v cli.Values) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case err := <-chanErrorReceived:
+			fmt.Printf("Error: %v\n", err)
 		case evt := <-chanMessageReceived:
 			if evt.Event.EventType == "" {
 				continue

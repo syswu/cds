@@ -534,11 +534,7 @@ func (s *Service) getPullRequestHandler() service.Handler {
 		name := muxVar(r, "name")
 		owner := muxVar(r, "owner")
 		repo := muxVar(r, "repo")
-		sid := muxVar(r, "id")
-		id, err := strconv.Atoi(sid)
-		if err != nil {
-			return sdk.WithStack(sdk.ErrWrongRequest)
-		}
+		id := muxVar(r, "id")
 
 		accessToken, accessTokenSecret, created, ok := getAccessTokens(ctx)
 		if !ok {
@@ -554,6 +550,7 @@ func (s *Service) getPullRequestHandler() service.Handler {
 		if err != nil {
 			return sdk.WrapError(err, "Unable to get authorized client %s %s/%s", name, owner, repo)
 		}
+
 		// Check if access token has been refreshed
 		if accessToken != client.GetAccessToken(ctx) {
 			w.Header().Set(sdk.HeaderXAccessToken, client.GetAccessToken(ctx))
@@ -1118,11 +1115,11 @@ func (s *Service) getListForks() service.Handler {
 }
 
 // Status returns sdk.MonitoringStatus, implements interface service.Service
-func (s *Service) Status(ctx context.Context) sdk.MonitoringStatus {
-	m := s.CommonMonitoring()
+func (s *Service) Status(ctx context.Context) *sdk.MonitoringStatus {
+	m := s.NewMonitoringStatus()
 
 	if s.Cfg.Servers["github"].URL != "" {
-		m.Lines = append(m.Lines, github.GetStatus()...)
+		m.AddLine(github.GetStatus()...)
 	}
 
 	return m

@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -48,6 +49,12 @@ var (
 	flagStartVaultAddr       string
 	flagStartVaultToken      string
 )
+
+type serviceConf struct {
+	arg     string
+	service service.Service
+	cfg     interface{}
+}
 
 var startCmd = &cobra.Command{
 	Use:   "start",
@@ -111,21 +118,6 @@ See $ engine config command for more details.
 
 		// initialize context
 		defer cancel()
-
-		// gracefully shutdown all
-		c := make(chan os.Signal, 1)
-		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-		go func() {
-			<-c
-			signal.Stop(c)
-			cancel()
-		}()
-
-		type serviceConf struct {
-			arg     string
-			service service.Service
-			cfg     interface{}
-		}
 
 		var (
 			serviceConfs []serviceConf
@@ -254,6 +246,16 @@ See $ engine config command for more details.
 			}
 		}
 
+		// gracefully shutdown all
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+		go func(ctx context.Context) {
+			<-c
+			unregisterServices(ctx, serviceConfs)
+			signal.Stop(c)
+			cancel()
+		}(ctx)
+
 		//Initialize logs
 		logConf := log.Conf{
 			Level:                      conf.Log.Level,
@@ -275,8 +277,10 @@ See $ engine config command for more details.
 			return serviceConfs[i].arg < serviceConfs[j].arg
 		})
 
+		var wg sync.WaitGroup
 		//Configure the services
-		for _, s := range serviceConfs {
+		for i := range serviceConfs {
+			s := serviceConfs[i]
 			if err := s.service.ApplyConfiguration(s.cfg); err != nil {
 				sdk.Exit("Unable to init service %s: %v", s.arg, err)
 			}
@@ -294,7 +298,11 @@ See $ engine config command for more details.
 				sdk.Exit("Unable to start tracing exporter: %v", err)
 			}
 
-			go start(ctx, s.service, s.cfg, s.arg)
+			wg.Add(1)
+			go func(srv serviceConf) {
+				start(ctx, srv.service, srv.cfg, srv.arg)
+				wg.Done()
+			}(s)
 
 			// Stupid trick: when API is starting wait a bit before start the other
 			if s.arg == "API" || s.arg == "api" {
@@ -302,17 +310,32 @@ See $ engine config command for more details.
 			}
 		}
 
+		wg.Wait()
+
 		//Wait for the end
 		<-ctx.Done()
-		if ctx.Err() != nil {
-			fmt.Printf("Exiting (%v)\n", ctx.Err())
-		}
+
 	},
+}
+
+func unregisterServices(ctx context.Context, serviceConfs []serviceConf) {
+	// unregister all services
+	for i := range serviceConfs {
+		s := serviceConfs[i]
+		fmt.Printf("Unregister (%v)\n", s.service.Name())
+		if err := s.service.Unregister(ctx); err != nil {
+			log.Error(ctx, "%s> Unable to unregister: %v", s.service.Name(), err)
+		}
+	}
+
+	if ctx.Err() != nil {
+		fmt.Printf("Exiting (%v)\n", ctx.Err())
+	}
 }
 
 func start(c context.Context, s service.Service, cfg interface{}, serviceName string) {
 	if err := serve(c, s, serviceName, cfg); err != nil {
-		sdk.Exit("Service has been stopped: %s %+v", serviceName, err)
+		fmt.Printf("Service has been stopped: %s %+v", serviceName, err)
 	}
 }
 

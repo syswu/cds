@@ -41,7 +41,7 @@ func CleanURL(url string) string {
 			u = "consumer-type"
 		case "key", "permProjectKey":
 			u = "project-key"
-		case "permWorkflowName":
+		case "permWorkflowName", "workflowName":
 			u = "workflow-name"
 		case "workflowID":
 			u = "workflow-id"
@@ -61,7 +61,7 @@ func CleanURL(url string) string {
 			u = "environment-name"
 		case "nodeRunID":
 			u = "node-run-id"
-		case "runJobId":
+		case "runJobID":
 			u = "run-job-id"
 		case "stepOrder":
 			u = "step-order"
@@ -98,9 +98,13 @@ func CleanURL(url string) string {
 		case "vcsServer":
 			u = "vcs-server"
 		case "metricName":
-      u = "metric-name"
-    case "cloneName":
-      u = "clone-name"
+			u = "metric-name"
+		case "cloneName":
+			u = "clone-name"
+		case "serviceName":
+			u = "service-name"
+		case "sessionID":
+			u = "session-id"
 		}
 
 		urlSplitted[i] = "<" + u + ">"

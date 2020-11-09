@@ -501,6 +501,12 @@ func (dao WorkflowDAO) withIntegrations(db gorp.SqlExecutor, ws *[]Workflow) err
 
 	for x := range *ws {
 		w := &(*ws)[x]
+		var err error
+		w.EventIntegrations, err = integration.LoadWorkflowIntegrationsByWorkflowID(db, w.ID)
+		if err != nil {
+			return err
+		}
+
 		w.InitMaps()
 		nodesArray := w.WorkflowData.Array()
 		for i := range nodesArray {
@@ -613,7 +619,6 @@ func (dao WorkflowDAO) withNotifications(db gorp.SqlExecutor, ws *[]Workflow) er
 	for x := range *ws {
 		w := &(*ws)[x]
 		w.Notifications = notificationsMap[w.ID]
-		log.Debug("workflow %d notifications: %+v", w.ID, w.Notifications)
 	}
 	return nil
 }
@@ -708,7 +713,7 @@ func (dao WorkflowDAO) LoadAll(ctx context.Context, db gorp.SqlExecutor) (sdk.Wo
 	}
 
 	delta := time.Since(t0).Seconds()
-	log.Info(ctx, "LoadAll - %d results in %.3f seconds", len(ws), delta)
+	log.Info(ctx, "WorkflowDAO> LoadAll - %d results in %.3f seconds", len(ws), delta)
 
 	return ws, nil
 }

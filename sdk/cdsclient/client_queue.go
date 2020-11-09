@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -53,19 +52,14 @@ func shrinkQueue(queue *sdk.WorkflowQueue, nbJobsToKeep int) time.Time {
 	return t0
 }
 
-func (c *client) QueuePolling(ctx context.Context, jobs chan<- sdk.WorkflowNodeJobRun, errs chan<- error, delay time.Duration, modelType string, ratioService *int) error {
+func (c *client) QueuePolling(ctx context.Context, goRoutines *sdk.GoRoutines, jobs chan<- sdk.WorkflowNodeJobRun, errs chan<- error, delay time.Duration, modelType string, ratioService *int) error {
 	jobsTicker := time.NewTicker(delay)
 
 	// This goroutine call the SSE route
 	chanMessageReceived := make(chan sdk.WebsocketEvent, 10)
 	chanMessageToSend := make(chan []sdk.WebsocketFilter, 10)
-	sdk.GoRoutine(ctx, "RequestWebsocket", func(ctx context.Context) {
-		for ctx.Err() == nil {
-			if err := c.RequestWebsocket(ctx, "/ws", chanMessageToSend, chanMessageReceived); err != nil {
-				log.Println("QueuePolling", err)
-			}
-			time.Sleep(1 * time.Second)
-		}
+	goRoutines.Exec(ctx, "RequestWebsocket", func(ctx context.Context) {
+		c.WebsocketEventsListen(ctx, goRoutines, chanMessageToSend, chanMessageReceived, errs)
 	})
 	chanMessageToSend <- []sdk.WebsocketFilter{{
 		Type: sdk.WebsocketFilterTypeQueue,
@@ -149,7 +143,6 @@ func (c *client) QueuePolling(ctx context.Context, jobs chan<- sdk.WorkflowNodeJ
 				jobs <- j
 			}
 		}
-
 	}
 }
 
@@ -182,7 +175,7 @@ func (c *client) QueueCountWorkflowNodeJobRun(since *time.Time, until *time.Time
 	url, _ := url.Parse("/queue/workflows/count")
 	q := url.Query()
 	if ratioService != nil {
-		q.Add("ratioService", string(*ratioService))
+		q.Add("ratioService", fmt.Sprintf("%d", *ratioService))
 	}
 	if modelType != "" {
 		q.Add("modelType", modelType)
@@ -225,10 +218,11 @@ func (c *client) QueueJobSendSpawnInfo(ctx context.Context, id int64, in []sdk.S
 }
 
 // QueueJobBook books a job for a Hatchery
-func (c *client) QueueJobBook(ctx context.Context, id int64) error {
+func (c *client) QueueJobBook(ctx context.Context, id int64) (sdk.WorkflowNodeJobRunBooked, error) {
+	var resp sdk.WorkflowNodeJobRunBooked
 	path := fmt.Sprintf("/queue/workflows/%d/book", id)
-	_, err := c.PostJSON(ctx, path, nil, nil)
-	return err
+	_, err := c.PostJSON(ctx, path, nil, &resp)
+	return resp, err
 }
 
 // QueueJobRelease release a job for a worker
@@ -499,6 +493,12 @@ func (c *client) queueDirectArtifactUpload(projectKey, integrationName string, n
 func (c *client) QueueJobTag(ctx context.Context, jobID int64, tags []sdk.WorkflowRunTag) error {
 	path := fmt.Sprintf("/queue/workflows/%d/tag", jobID)
 	_, err := c.PostJSON(ctx, path, tags, nil)
+	return err
+}
+
+func (c *client) QueueJobSetVersion(ctx context.Context, jobID int64, version sdk.WorkflowRunVersion) error {
+	path := fmt.Sprintf("/queue/workflows/%d/version", jobID)
+	_, err := c.PostJSON(ctx, path, version, nil)
 	return err
 }
 

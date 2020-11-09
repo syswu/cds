@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"net/http"
+
 	"github.com/ovh/cds/engine/api"
 	"github.com/ovh/cds/engine/service"
 )
@@ -10,7 +12,9 @@ type Service struct {
 	service.Common
 	Cfg     Configuration
 	Router  *api.Router
+	Server  *http.Server
 	HTMLDir string
+	DocsDir string
 }
 
 // Configuration is the ui configuration structure
@@ -27,4 +31,5 @@ type Configuration struct {
 	URL      string                          `toml:"url" comment:"Public URL of this UI service." default:"http://localhost:8080" json:"url"`
 	API      service.APIServiceConfiguration `toml:"api" comment:"######################\n CDS API Settings \n######################" json:"api"`
 	HooksURL string                          `toml:"hooksURL" comment:"Hooks µService URL" default:"http://localhost:8083" json:"hooksURL"`
+	CDNURL   string                          `toml:"cdnURL" comment:"CDN µService URL" default:"http://localhost:8089" json:"cdnURL"`
 }

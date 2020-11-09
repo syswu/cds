@@ -89,7 +89,15 @@ func processActionVariables(a *sdk.Action, parent *sdk.Action, jobParameters []s
 
 	// replaces placeholder in all children recursively
 	for i := range a.Actions {
-		if err := processActionVariables(&a.Actions[i], a, jobParameters, secrets); err != nil {
+		// Do not interpolate yet cds.version for child because the value can change during job execution
+		filterJobParameters := make([]sdk.Parameter, 0, len(jobParameters))
+		for i := range jobParameters {
+			if jobParameters[i].Name != "cds.version" {
+				filterJobParameters = append(filterJobParameters, jobParameters[i])
+			}
+		}
+
+		if err := processActionVariables(&a.Actions[i], a, filterJobParameters, secrets); err != nil {
 			return err
 		}
 	}
@@ -117,8 +125,8 @@ func (w *CurrentWorker) runJob(ctx context.Context, a *sdk.Action, jobID int64, 
 	}
 
 	defer func() {
-		w.SendEndOfJobLog(ctx, workerruntime.LevelInfo, "End of Job", jobResult.Status)
-		log.Info(ctx, "runJob> job %s (%d)", a.Name, jobID)
+		w.gelfLogger.hook.Flush()
+		log.Info(ctx, "runJob> end of job %s (%d)", a.Name, jobID)
 	}()
 
 	var nDisabled, nCriticalFailed int
@@ -127,6 +135,12 @@ func (w *CurrentWorker) runJob(ctx context.Context, a *sdk.Action, jobID int64, 
 		w.stepLogLine = 0
 
 		ctx = workerruntime.SetStepOrder(ctx, jobStepIndex)
+		if step.StepName != "" {
+			ctx = workerruntime.SetStepName(ctx, step.StepName)
+		} else {
+			ctx = workerruntime.SetStepName(ctx, step.Name)
+		}
+
 		if err := w.updateStepStatus(ctx, jobID, jobStepIndex, sdk.StatusBuilding); err != nil {
 			jobResult.Status = sdk.StatusFail
 			jobResult.Reason = fmt.Sprintf("Cannot update step (%d) status (%s): %v", jobStepIndex, sdk.StatusBuilding, err)
@@ -191,10 +205,9 @@ func (w *CurrentWorker) runAction(ctx context.Context, a sdk.Action, jobID int64
 	log.Info(ctx, "runAction> start action %s %s %d", a.StepName, actionName, jobID)
 	defer func() { log.Info(ctx, "runAction> end action %s %s run %d", a.StepName, actionName, jobID) }()
 
-	w.SendLog(ctx, workerruntime.LevelInfo, fmt.Sprintf("Starting step \"%s\"", actionName))
-	var t0 = time.Now()
+	w.SendLog(ctx, workerruntime.LevelInfo, fmt.Sprintf("Starting step %q", actionName))
 	defer func() {
-		w.SendLog(ctx, workerruntime.LevelInfo, fmt.Sprintf("End of step \"%s\" (%s)", actionName, sdk.Round(time.Since(t0), time.Second).String()))
+		w.SendTerminatedStepLog(ctx, workerruntime.LevelInfo, fmt.Sprintf("End of step %q", actionName))
 		w.gelfLogger.hook.Flush()
 	}()
 
@@ -520,7 +533,6 @@ func (w *CurrentWorker) ProcessJob(jobInfo sdk.WorkflowNodeJobRunData) (res sdk.
 
 	ctx = workerruntime.SetJobID(ctx, jobInfo.NodeJobRun.ID)
 	ctx = workerruntime.SetStepOrder(ctx, 0)
-
 	defer func() {
 		log.Warning(ctx, "processJob> Status: %s | Reason: %s", res.Status, res.Reason)
 	}()
@@ -616,7 +628,6 @@ func (w *CurrentWorker) ProcessJob(jobInfo sdk.WorkflowNodeJobRunData) (res sdk.
 	if err := teardownDirectory(w.basedir, ""); err != nil {
 		log.Error(ctx, "Cannot remove basedir content: %s", err)
 	}
-	w.gelfLogger.hook.Flush()
 
 	return res
 }

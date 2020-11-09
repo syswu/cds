@@ -1,10 +1,11 @@
 import { ChangeDetectionStrategy, Component } from '@angular/core';
-import { Toast } from 'angular2-toaster';
+import { Toast } from 'angular2-toaster-sgu';
 
 export class ToastHTTPErrorData {
     status: number;
     from: string;
     request_id: string;
+    help: string;
 }
 
 @Component({

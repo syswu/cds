@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/ioutil"
@@ -10,7 +11,9 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/ovh/cds/engine/api/database/gorpmapping"
+	"github.com/ovh/cds/engine/api/project"
 	"github.com/ovh/cds/engine/api/services"
+	"github.com/ovh/cds/engine/api/workflow"
 	"github.com/ovh/cds/engine/featureflipping"
 	"github.com/ovh/cds/engine/service"
 	"github.com/ovh/cds/sdk"
@@ -19,8 +22,8 @@ import (
 
 func (api *API) postMaintenanceHandler() service.Handler {
 	return func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
-		enable := FormBool(r, "enable")
-		hook := FormBool(r, "withHook")
+		enable := service.FormBool(r, "enable")
+		hook := service.FormBool(r, "withHook")
 
 		if hook {
 			srvs, err := services.LoadAllByType(ctx, api.mustDB(), sdk.TypeHooks)
@@ -47,9 +50,9 @@ func (api *API) getAdminServicesHandler() service.Handler {
 
 		var err error
 		if r.FormValue("type") != "" {
-			srvs, err = services.LoadAllByType(ctx, api.mustDB(), r.FormValue("type"))
+			srvs, err = services.LoadAllByType(ctx, api.mustDB(), r.FormValue("type"), services.LoadOptions.WithStatus)
 		} else {
-			srvs, err = services.LoadAll(ctx, api.mustDB())
+			srvs, err = services.LoadAll(ctx, api.mustDB(), services.LoadOptions.WithStatus)
 		}
 		if err != nil {
 			return err
@@ -86,7 +89,7 @@ func (api *API) getAdminServiceHandler() service.Handler {
 	return func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 		vars := mux.Vars(r)
 		name := vars["name"]
-		srv, err := services.LoadByName(ctx, api.mustDB(), name)
+		srv, err := services.LoadByName(ctx, api.mustDB(), name, services.LoadOptions.WithStatus)
 		if err != nil {
 			return err
 		}
@@ -141,13 +144,14 @@ func selectDeleteAdminServiceCallHandler(api *API, method string) service.Handle
 				Message: err.Error(),
 			}, err)
 		}
+		reader := bytes.NewReader(btes)
 
 		log.Debug("selectDeleteAdminServiceCallHandler> %s : %s", query, string(btes))
 
 		if strings.HasPrefix(query, "/debug/pprof/") {
-			return service.Write(w, btes, code, "text/plain")
+			return service.Write(w, reader, code, "text/plain")
 		}
-		return service.Write(w, btes, code, "application/json")
+		return service.Write(w, reader, code, "application/json")
 	}
 }
 
@@ -173,7 +177,7 @@ func putPostAdminServiceCallHandler(api *API, method string) service.Handler {
 			}, err)
 		}
 
-		return service.Write(w, btes, code, "application/json")
+		return service.Write(w, bytes.NewReader(btes), code, "application/json")
 	}
 }
 
@@ -297,7 +301,7 @@ func (api *API) postAdminFeatureFlipping() service.Handler {
 			return err
 		}
 
-		if err := featureflipping.Insert(ctx, gorpmapping.Mapper, api.mustDB(), &f); err != nil {
+		if err := featureflipping.Insert(gorpmapping.Mapper, api.mustDB(), &f); err != nil {
 			return err
 		}
 		return service.WriteJSON(w, f, http.StatusOK)
@@ -324,7 +328,7 @@ func (api *API) putAdminFeatureFlipping() service.Handler {
 		}
 
 		f.ID = oldF.ID
-		if err := featureflipping.Update(ctx, gorpmapping.Mapper, api.mustDB(), &f); err != nil {
+		if err := featureflipping.Update(gorpmapping.Mapper, api.mustDB(), &f); err != nil {
 			return err
 		}
 
@@ -342,7 +346,36 @@ func (api *API) deleteAdminFeatureFlipping() service.Handler {
 			return err
 		}
 
-		if err := featureflipping.Delete(ctx, api.mustDB(), oldF.ID); err != nil {
+		if err := featureflipping.Delete(api.mustDB(), oldF.ID); err != nil {
+			return err
+		}
+
+		return nil
+	}
+}
+
+func (api *API) postWorkflowMaxRunHandler() service.Handler {
+	return func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+		vars := mux.Vars(r)
+		key := vars["key"]
+		name := vars["permWorkflowName"]
+
+		var request sdk.UpdateMaxRunRequest
+		if err := service.UnmarshalBody(r, &request); err != nil {
+			return err
+		}
+
+		proj, err := project.Load(ctx, api.mustDBWithCtx(ctx), key)
+		if err != nil {
+			return err
+		}
+
+		wf, err := workflow.Load(ctx, api.mustDBWithCtx(ctx), api.Cache, *proj, name, workflow.LoadOptions{})
+		if err != nil {
+			return err
+		}
+
+		if err := workflow.UpdateMaxRunsByID(api.mustDBWithCtx(ctx), wf.ID, request.MaxRuns); err != nil {
 			return err
 		}
 

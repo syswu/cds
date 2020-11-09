@@ -16,7 +16,7 @@ import * as pipelineActions from 'app/store/pipelines.action';
 import { PipelinesStateModel } from 'app/store/pipelines.state';
 import cloneDeep from 'lodash-es/cloneDeep';
 import { SemanticModalComponent } from 'ng-semantic/ng-semantic';
-import { DragulaService } from 'ng2-dragula';
+import { DragulaService } from 'ng2-dragula-sgu';
 import { Subscription } from 'rxjs';
 import { finalize, first } from 'rxjs/operators';
 
@@ -272,7 +272,13 @@ export class PipelineWorkflowComponent implements OnInit, OnDestroy {
                     this.selectedStage.conditions.plain = null;
                 } else {
                     this.selectedStage.conditions.lua_script = '';
+                    if (this.selectedStage.conditions.plain) {
+                        this.selectedStage.conditions.plain.forEach(cc => {
+                            cc.value = cc.value.toString();
+                        });
+                    }
                 }
+
                 this.store.dispatch(new pipelineActions.UpdatePipelineStage({
                     projectKey: this.project.key,
                     pipelineName: this.pipeline.name,

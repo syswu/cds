@@ -23,10 +23,26 @@ export class WorkflowRunRequest {
     from_nodes: Array<number>;
 }
 
-export class WorkflowRun {
-
+export class WorkflowRunSummary {
     id: number;
     num: number;
+    version: string;
+    start: string;
+    status: string;
+    last_modified: string;
+    last_subnumber: number;
+    last_execution: string;
+    to_craft_opts: any;
+    tags: Array<WorkflowRunTags>;
+
+    // Useful for UI
+    duration: string;
+}
+
+export class WorkflowRun {
+    id: number;
+    num: number;
+    version: string;
     last_subnumber: number;
     project_id: number;
     workflow_id: number;
@@ -59,6 +75,21 @@ export class WorkflowRun {
             return { tag: t.Tag, value: t.Value }
         });
         return wr;
+    }
+
+    static Summary(workflowRun: WorkflowRun): WorkflowRunSummary {
+        let wrs = new WorkflowRunSummary();
+        wrs.id = workflowRun.id;
+        wrs.last_execution = workflowRun.last_execution;
+        wrs.last_modified = workflowRun.last_modified;
+        wrs.last_subnumber = workflowRun.last_subnumber;
+        wrs.num = workflowRun.num;
+        wrs.version = workflowRun.version;
+        wrs.start = workflowRun.start;
+        wrs.status = workflowRun.status;
+        wrs.duration = workflowRun.duration
+        wrs.tags = workflowRun.tags;
+        return wrs;
     }
 }
 

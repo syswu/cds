@@ -28,9 +28,9 @@ import (
 	"github.com/ovh/cds/engine/api/authentication/gitlab"
 	"github.com/ovh/cds/engine/api/authentication/ldap"
 	"github.com/ovh/cds/engine/api/authentication/local"
+	"github.com/ovh/cds/engine/api/authentication/oidc"
 	"github.com/ovh/cds/engine/api/bootstrap"
 	"github.com/ovh/cds/engine/api/broadcast"
-	"github.com/ovh/cds/engine/api/cache"
 	"github.com/ovh/cds/engine/api/database/gorpmapping"
 	"github.com/ovh/cds/engine/api/event"
 	"github.com/ovh/cds/engine/api/integration"
@@ -46,10 +46,12 @@ import (
 	"github.com/ovh/cds/engine/api/worker"
 	"github.com/ovh/cds/engine/api/workermodel"
 	"github.com/ovh/cds/engine/api/workflow"
+	"github.com/ovh/cds/engine/cache"
 	"github.com/ovh/cds/engine/database"
 	"github.com/ovh/cds/engine/featureflipping"
 	"github.com/ovh/cds/engine/gorpmapper"
 	"github.com/ovh/cds/engine/service"
+	"github.com/ovh/cds/engine/websocket"
 	"github.com/ovh/cds/sdk"
 	"github.com/ovh/cds/sdk/cdsclient"
 	"github.com/ovh/cds/sdk/jws"
@@ -77,7 +79,7 @@ type Configuration struct {
 			Host     string `toml:"host" default:"localhost:6379" comment:"If your want to use a redis-sentinel based cluster, follow this syntax! <clustername>@sentinel1:26379,sentinel2:26379,sentinel3:26379" json:"host"`
 			Password string `toml:"password" json:"-"`
 		} `toml:"redis" comment:"Connect CDS to a redis cache If you more than one CDS instance and to avoid losing data at startup" json:"redis"`
-	} `toml:"cache" comment:"######################\n CDS Cache Settings \n#####################\n" json:"cache"`
+	} `toml:"cache" comment:"######################\n CDS Cache Settings \n#####################" json:"cache"`
 	Directories struct {
 		Download string `toml:"download" default:"/var/lib/cds-engine" json:"download"`
 	} `toml:"directories" json:"directories"`
@@ -124,27 +126,35 @@ type Configuration struct {
 		Github struct {
 			Enabled        bool   `toml:"enabled" default:"false" json:"enabled"`
 			SignupDisabled bool   `toml:"signupDisabled" default:"false" json:"signupDisabled"`
-			URL            string `toml:"url" json:"url" default:"https://github.com" comment:"#######\n Github URL"`
-			APIURL         string `toml:"apiUrl" json:"apiUrl" default:"https://api.github.com" comment:"#######\n Github API URL"`
-			ClientID       string `toml:"clientId" json:"-" comment:"#######\n Github OAuth Client ID"`
-			ClientSecret   string `toml:"clientSecret" json:"-"  comment:"Github OAuth Client Secret"`
-		} `toml:"github" json:"github"`
+			URL            string `toml:"url" json:"url" default:"https://github.com" comment:"Github URL"`
+			APIURL         string `toml:"apiUrl" json:"apiUrl" default:"https://api.github.com" comment:"Github API URL"`
+			ClientID       string `toml:"clientId" json:"-" comment:"Github OAuth Client ID"`
+			ClientSecret   string `toml:"clientSecret" json:"-" comment:"Github OAuth Client Secret"`
+		} `toml:"github" json:"github" comment:"#######\n CDS <-> GitHub Auth. Documentation on https://ovh.github.io/cds/docs/integrations/github/github_authentication/ \n######"`
 		Gitlab struct {
 			Enabled        bool   `toml:"enabled" default:"false" json:"enabled"`
 			SignupDisabled bool   `toml:"signupDisabled" default:"false" json:"signupDisabled"`
-			URL            string `toml:"url" json:"url" default:"https://gitlab.com" comment:"#######\n Gitlab URL"`
-			ApplicationID  string `toml:"applicationID" json:"-" comment:"#######\n Gitlab OAuth Application ID"`
-			Secret         string `toml:"secret" json:"-"  comment:"Gitlab OAuth Application Secret"`
-		} `toml:"gitlab" json:"gitlab"`
-	} `toml:"auth" comment:"##############################\n CDS Authentication Settings#\n#############################" json:"auth"`
+			URL            string `toml:"url" json:"url" default:"https://gitlab.com" comment:"GitLab URL"`
+			ApplicationID  string `toml:"applicationID" json:"-" comment:"GitLab OAuth Application ID"`
+			Secret         string `toml:"secret" json:"-" comment:"GitLab OAuth Application Secret"`
+		} `toml:"gitlab" json:"gitlab" comment:"#######\n CDS <-> GitLab Auth. Documentation on https://ovh.github.io/cds/docs/integrations/gitlab/gitlab_authentication/ \n######"`
+		OIDC struct {
+			Enabled        bool   `toml:"enabled" default:"false" json:"enabled"`
+			SignupDisabled bool   `toml:"signupDisabled" default:"false" json:"signupDisabled"`
+			URL            string `toml:"url" json:"url" default:"" comment:"Open ID connect config URL"`
+			ClientID       string `toml:"clientId" json:"-" comment:"OIDC Client ID"`
+			ClientSecret   string `toml:"clientSecret" json:"-" comment:"OIDC Client Secret"`
+		} `toml:"oidc" json:"oidc" comment:"#######\n CDS <-> Open ID Connect Auth. Documentation on https://ovh.github.io/cds/docs/integrations/openid-connect/ \n######"`
+	} `toml:"auth" comment:"##############################\n CDS Authentication Settings# \n#############################" json:"auth"`
 	SMTP struct {
-		Disable  bool   `toml:"disable" default:"true" json:"disable" comment:"Set to false to enable the internal SMTP client"`
-		Host     string `toml:"host" json:"host" comment:"smtp host"`
-		Port     string `toml:"port" json:"port" comment:"smtp port"`
-		TLS      bool   `toml:"tls" json:"tls"`
-		User     string `toml:"user" json:"user"`
-		Password string `toml:"password" json:"-"`
-		From     string `toml:"from" default:"no-reply@cds.local" json:"from"`
+		Disable               bool   `toml:"disable" default:"true" json:"disable" comment:"Set to false to enable the internal SMTP client. If false, emails will be displayed in CDS API Log."`
+		Host                  string `toml:"host" json:"host" comment:"smtp host"`
+		Port                  string `toml:"port" json:"port" comment:"smtp port"`
+		ModeTLS               string `toml:"modeTLS" json:"modeTLS" default:"" comment:"possible values: empty, tls, starttls"`
+		InsecureSkipVerifyTLS bool   `toml:"insecureSkipVerifyTLS" json:"insecureSkipVerifyTLS" default:"false" comment:"skip TLS verification with TLS / StartTLS mode"`
+		User                  string `toml:"user" json:"user" comment:"smtp username"`
+		Password              string `toml:"password" json:"-" comment:"smtp password"`
+		From                  string `toml:"from" default:"no-reply@cds.local" json:"from" comment:"smtp from"`
 	} `toml:"smtp" comment:"#####################\n# CDS SMTP Settings \n####################" json:"smtp"`
 	Artifact struct {
 		Mode  string `toml:"mode" default:"local" comment:"swift, awss3 or local" json:"mode"`
@@ -188,6 +198,13 @@ type Configuration struct {
 		StepMaxSize    int64 `toml:"stepMaxSize" default:"15728640" comment:"Max step logs size in bytes (default: 15MB)" json:"stepMaxSize"`
 		ServiceMaxSize int64 `toml:"serviceMaxSize" default:"15728640" comment:"Max service logs size in bytes (default: 15MB)" json:"serviceMaxSize"`
 	} `toml:"log" json:"log" comment:"###########################\n Log settings.\n##########################"`
+	Help struct {
+		Content string `toml:"content" comment:"Help Content. Warning: this message could be view by anonymous user. Markdown accepted." json:"content" default:""`
+		Error   string `toml:"error" comment:"Help displayed to user on each error. Warning: this message could be view by anonymous user. Markdown accepted." json:"error" default:""`
+	} `toml:"help" comment:"######################\n 'Help' informations \n######################" json:"help"`
+	Workflow struct {
+		MaxRuns int64 `toml:"maxRuns" comment:"Maximum of runs by workflow" json:"maxRuns" default:"255"`
+	} `toml:"workflow" comment:"######################\n 'Workflow' global configuration \n######################" json:"workflow"`
 }
 
 // DefaultValues is the struc for API Default configuration default values
@@ -232,7 +249,8 @@ type API struct {
 	SharedStorage       objectstore.Driver
 	StartupTime         time.Time
 	Maintenance         bool
-	websocketBroker     *websocketBroker
+	WSBroker            *websocket.Broker
+	WSServer            *websocketServer
 	Cache               cache.Store
 	Metrics             struct {
 		WorkflowRunFailed        *stats.Int64Measure
@@ -350,15 +368,30 @@ func (a *API) CheckConfiguration(config interface{}) error {
 	return nil
 }
 
+type StartupConfigConsumerType string
+
+const (
+	StartupConfigConsumerTypeUI            StartupConfigConsumerType = "ui"
+	StartupConfigConsumerTypeHatchery      StartupConfigConsumerType = "hatchery"
+	StartupConfigConsumerTypeHooks         StartupConfigConsumerType = "hooks"
+	StartupConfigConsumerTypeRepositories  StartupConfigConsumerType = "repositories"
+	StartupConfigConsumerTypeDBMigrate     StartupConfigConsumerType = "db-migrate"
+	StartupConfigConsumerTypeVCS           StartupConfigConsumerType = "vcs"
+	StartupConfigConsumerTypeCDN           StartupConfigConsumerType = "cdn"
+	StartupConfigConsumerTypeCDNStorageCDS StartupConfigConsumerType = "cdn-storage-cds"
+	StartupConfigConsumerTypeElasticsearch StartupConfigConsumerType = "elasticsearch"
+)
+
 type StartupConfig struct {
-	Consumers []StartupConfigService `json:"consumers"`
-	IAT       int64                  `json:"iat"`
+	Consumers []StartupConfigConsumer `json:"consumers"`
+	IAT       int64                   `json:"iat"`
 }
-type StartupConfigService struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	ServiceType string `json:"service_type"`
+
+type StartupConfigConsumer struct {
+	ID          string                    `json:"id"`
+	Name        string                    `json:"name"`
+	Description string                    `json:"description"`
+	Type        StartupConfigConsumerType `json:"type"`
 }
 
 // Serve will start the http api server
@@ -415,7 +448,8 @@ func (a *API) Serve(ctx context.Context) error {
 		a.Config.SMTP.From,
 		a.Config.SMTP.Host,
 		a.Config.SMTP.Port,
-		a.Config.SMTP.TLS,
+		a.Config.SMTP.ModeTLS,
+		a.Config.SMTP.InsecureSkipVerifyTLS,
 		a.Config.SMTP.Disable)
 
 	//Initialize artifacts storage
@@ -482,6 +516,7 @@ func (a *API) Serve(ctx context.Context) error {
 		a.Config.Database.Role,
 		a.Config.Database.Password,
 		a.Config.Database.Name,
+		a.Config.Database.Schema,
 		a.Config.Database.Host,
 		a.Config.Database.Port,
 		a.Config.Database.SSLMode,
@@ -509,15 +544,19 @@ func (a *API) Serve(ctx context.Context) error {
 		a.Config.Cache.Redis.Password,
 		a.Config.Cache.TTL)
 	if err != nil {
-		return fmt.Errorf("cannot connect to cache store: %v", err)
+		return sdk.WrapError(err, "cannot connect to cache store")
 	}
 
 	log.Info(ctx, "Initializing HTTP router")
+	a.GoRoutines = sdk.NewGoRoutines()
 	a.Router = &Router{
 		Mux:        mux.NewRouter(),
 		Background: ctx,
 	}
 	a.InitRouter()
+	if err := a.initWebsocket(event.DefaultPubSubKey); err != nil {
+		return err
+	}
 	if err := InitRouterMetrics(ctx, a); err != nil {
 		log.Error(ctx, "unable to init router metrics: %v", err)
 	}
@@ -582,6 +621,18 @@ func (a *API) Serve(ctx context.Context) error {
 			a.Config.Auth.Gitlab.Secret,
 		)
 	}
+	if a.Config.Auth.OIDC.Enabled {
+		a.AuthenticationDrivers[sdk.ConsumerOIDC], err = oidc.NewDriver(
+			a.Config.Auth.OIDC.SignupDisabled,
+			a.Config.URL.UI,
+			a.Config.Auth.OIDC.URL,
+			a.Config.Auth.OIDC.ClientID,
+			a.Config.Auth.OIDC.ClientSecret,
+		)
+		if err != nil {
+			return err
+		}
+	}
 
 	if a.Config.Auth.CorporateSSO.Enabled {
 		driverConfig := corpsso.Config{
@@ -600,55 +651,60 @@ func (a *API) Serve(ctx context.Context) error {
 	log.Info(ctx, "Initializing event broker...")
 	if err := event.Initialize(ctx, a.mustDB(), a.Cache); err != nil {
 		log.Error(ctx, "error while initializing event system: %s", err)
-	} else {
-		go event.DequeueEvent(ctx, a.mustDB())
 	}
 
+	a.GoRoutines.Run(ctx, "event.dequeue", func(ctx context.Context) {
+		event.DequeueEvent(ctx, a.mustDB())
+	}, a.PanicDump())
+
 	log.Info(ctx, "Initializing internal routines...")
-	sdk.GoRoutine(ctx, "maintenance.Subscribe", func(ctx context.Context) {
+	a.GoRoutines.Run(ctx, "maintenance.Subscribe", func(ctx context.Context) {
 		if err := a.listenMaintenance(ctx); err != nil {
 			log.Error(ctx, "error while initializing listen maintenance routine: %s", err)
 		}
 	}, a.PanicDump())
 
-	sdk.GoRoutine(ctx, "workermodel.Initialize", func(ctx context.Context) {
+	a.GoRoutines.Exec(ctx, "workermodel.Initialize", func(ctx context.Context) {
 		if err := workermodel.Initialize(ctx, a.DBConnectionFactory.GetDBMap(gorpmapping.Mapper), a.Cache); err != nil {
 			log.Error(ctx, "error while initializing worker models routine: %s", err)
 		}
 	}, a.PanicDump())
-	sdk.GoRoutine(ctx, "worker.Initialize", func(ctx context.Context) {
+	a.GoRoutines.Run(ctx, "worker.Initialize", func(ctx context.Context) {
 		if err := worker.Initialize(ctx, a.DBConnectionFactory.GetDBMap(gorpmapping.Mapper), a.Cache); err != nil {
 			log.Error(ctx, "error while initializing workers routine: %s", err)
 		}
 	}, a.PanicDump())
-	sdk.GoRoutine(ctx, "action.ComputeAudit", func(ctx context.Context) {
+	a.GoRoutines.Run(ctx, "action.ComputeAudit", func(ctx context.Context) {
 		chanEvent := make(chan sdk.Event)
 		event.Subscribe(chanEvent)
 		action.ComputeAudit(ctx, a.DBConnectionFactory.GetDBMap(gorpmapping.Mapper), chanEvent)
 	}, a.PanicDump())
-	sdk.GoRoutine(ctx, "audit.ComputePipelineAudit", func(ctx context.Context) {
+	a.GoRoutines.Run(ctx, "audit.ComputePipelineAudit", func(ctx context.Context) {
 		audit.ComputePipelineAudit(ctx, a.DBConnectionFactory.GetDBMap(gorpmapping.Mapper))
 	}, a.PanicDump())
-	sdk.GoRoutine(ctx, "audit.ComputeWorkflowAudit", func(ctx context.Context) {
+	a.GoRoutines.Run(ctx, "audit.ComputeWorkflowAudit", func(ctx context.Context) {
 		audit.ComputeWorkflowAudit(ctx, a.DBConnectionFactory.GetDBMap(gorpmapping.Mapper))
 	}, a.PanicDump())
-	sdk.GoRoutine(ctx, "auditCleanerRoutine(ctx", func(ctx context.Context) {
+	a.GoRoutines.Run(ctx, "auditCleanerRoutine(ctx", func(ctx context.Context) {
 		auditCleanerRoutine(ctx, a.DBConnectionFactory.GetDBMap(gorpmapping.Mapper))
 	})
-	sdk.GoRoutine(ctx, "repositoriesmanager.ReceiveEvents", func(ctx context.Context) {
+	a.GoRoutines.Run(ctx, "repositoriesmanager.ReceiveEvents", func(ctx context.Context) {
 		repositoriesmanager.ReceiveEvents(ctx, a.DBConnectionFactory.GetDBMap(gorpmapping.Mapper), a.Cache)
 	}, a.PanicDump())
-	sdk.GoRoutine(ctx, "services.KillDeadServices", func(ctx context.Context) {
+	a.GoRoutines.Run(ctx, "services.KillDeadServices", func(ctx context.Context) {
 		services.KillDeadServices(ctx, a.mustDB)
 	}, a.PanicDump())
-	sdk.GoRoutine(ctx, "broadcast.Initialize", func(ctx context.Context) {
+	a.GoRoutines.Run(ctx, "broadcast.Initialize", func(ctx context.Context) {
 		broadcast.Initialize(ctx, a.DBConnectionFactory.GetDBMap(gorpmapping.Mapper))
 	}, a.PanicDump())
-	sdk.GoRoutine(ctx, "api.serviceAPIHeartbeat", func(ctx context.Context) {
+	a.GoRoutines.Run(ctx, "api.serviceAPIHeartbeat", func(ctx context.Context) {
 		a.serviceAPIHeartbeat(ctx)
 	}, a.PanicDump())
-	sdk.GoRoutine(ctx, "authentication.SessionCleaner", func(ctx context.Context) {
+	a.GoRoutines.Run(ctx, "authentication.SessionCleaner", func(ctx context.Context) {
 		authentication.SessionCleaner(ctx, a.mustDB, 10*time.Second)
+	}, a.PanicDump())
+	a.GoRoutines.Run(ctx, "api.WorkflowRunCraft", func(ctx context.Context) {
+		a.WorkflowRunCraft(ctx, 100*time.Millisecond)
 	}, a.PanicDump())
 
 	migrate.Add(ctx, sdk.Migration{Name: "RunsSecrets", Release: "0.47.0", Blocker: false, Automatic: true, ExecFunc: func(ctx context.Context) error {
@@ -710,7 +766,7 @@ func (a *API) Serve(ctx context.Context) error {
 	log.Info(ctx, "API Public Key: \n%s", string(pubKey))
 
 	// Init Services
-	services.Initialize(ctx, a.DBConnectionFactory, a.PanicDump())
+	services.Initialize(ctx, a.DBConnectionFactory, a.GoRoutines, a.PanicDump())
 
 	externalServices := make([]services.ExternalService, 0, len(a.Config.Services))
 	for _, s := range a.Config.Services {
@@ -736,25 +792,33 @@ func (a *API) Serve(ctx context.Context) error {
 	if err := services.InitExternal(ctx, a.mustDB(), externalServices); err != nil {
 		return fmt.Errorf("unable to init external service: %+v", err)
 	}
-	sdk.GoRoutine(ctx, "pings-external-services",
+	a.GoRoutines.Run(ctx, "pings-external-services",
 		func(ctx context.Context) {
 			services.Pings(ctx, a.mustDB, externalServices)
 		}, a.PanicDump())
-	sdk.GoRoutine(ctx, "workflow.Initialize",
+	a.GoRoutines.Run(ctx, "workflow.Initialize",
 		func(ctx context.Context) {
-			workflow.Initialize(ctx, a.DBConnectionFactory.GetDBMap(gorpmapping.Mapper), a.Cache, a.Config.URL.UI, a.Config.DefaultOS, a.Config.DefaultArch, a.Config.Log.StepMaxSize)
+			workflow.Initialize(ctx, a.DBConnectionFactory.GetDBMap(gorpmapping.Mapper), a.Cache, a.Config.URL.UI, a.Config.DefaultOS, a.Config.DefaultArch, a.Config.Log.StepMaxSize, a.Config.Workflow.MaxRuns)
 		}, a.PanicDump())
-	sdk.GoRoutine(ctx, "PushInElasticSearch",
+	a.GoRoutines.Run(ctx, "PushInElasticSearch",
 		func(ctx context.Context) {
 			event.PushInElasticSearch(ctx, a.mustDB(), a.Cache)
 		}, a.PanicDump())
-	sdk.GoRoutine(ctx, "Metrics.pushInElasticSearch",
+	a.GoRoutines.Run(ctx, "Metrics.pushInElasticSearch",
 		func(ctx context.Context) {
 			metrics.Init(ctx, a.DBConnectionFactory.GetDBMap(gorpmapping.Mapper))
 		}, a.PanicDump())
-	sdk.GoRoutine(ctx, "Purge",
+	a.GoRoutines.Run(ctx, "Purge-MarkRuns",
 		func(ctx context.Context) {
-			purge.Initialize(ctx, a.Cache, a.DBConnectionFactory.GetDBMap(gorpmapping.Mapper), a.SharedStorage, a.Metrics.WorkflowRunsMarkToDelete, a.Metrics.WorkflowRunsDeleted)
+			purge.MarkRunsAsDelete(ctx, a.Cache, a.DBConnectionFactory.GetDBMap(gorpmapping.Mapper), a.Metrics.WorkflowRunsMarkToDelete)
+		}, a.PanicDump())
+	a.GoRoutines.Run(ctx, "Purge-Runs",
+		func(ctx context.Context) {
+			purge.WorkflowRuns(ctx, a.DBConnectionFactory.GetDBMap(gorpmapping.Mapper), a.SharedStorage, a.Metrics.WorkflowRunsMarkToDelete, a.Metrics.WorkflowRunsDeleted)
+		}, a.PanicDump())
+	a.GoRoutines.Run(ctx, "Purge-Workflow",
+		func(ctx context.Context) {
+			purge.Workflow(ctx, a.Cache, a.DBConnectionFactory.GetDBMap(gorpmapping.Mapper), a.Metrics.WorkflowRunsMarkToDelete)
 		}, a.PanicDump())
 
 	// Check maintenance on redis
@@ -819,6 +883,15 @@ func (a *API) PanicDump() func(s string) (io.WriteCloser, error) {
 		log.Error(context.TODO(), "API Panic stacktrace: %s", s)
 		return cache.NewWriteCloser(a.Cache, cache.Key("api", "panic_dump", s), panicDumpTTL), nil
 	}
+}
+
+// SetCookieSession on given response writter, automatically add domain and path based on api config.
+// This will returns a cookie with no expiration date that should be dropped by browser when closed.
+func (a *API) SetCookieSession(w http.ResponseWriter, name, value string) {
+	a.setCookie(w, &http.Cookie{
+		Name:  name,
+		Value: value,
+	})
 }
 
 // SetCookie on given response writter, automatically add domain and path based on api config.

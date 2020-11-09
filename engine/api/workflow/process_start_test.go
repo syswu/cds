@@ -54,14 +54,14 @@ func TestProcessJoinDefaultCondition(t *testing.T) {
 	require.NoError(t, workflow.Insert(context.TODO(), db, cache, *proj, &wr.Workflow))
 
 	// Create run
-	wrr, err := workflow.CreateRun(db.DbMap, &wr.Workflow, nil, u)
+	wrr, err := workflow.CreateRun(db.DbMap, &wr.Workflow, sdk.WorkflowRunPostHandlerOption{AuthConsumerID: consumer.ID})
 	require.NoError(t, err)
 	wr.ID = wrr.ID
 	wr.WorkflowID = wr.Workflow.ID
 	require.NoError(t, workflow.UpdateWorkflowRun(context.TODO(), db, wr))
 
 	// Start workflow
-	_, err = workflow.StartWorkflowRun(context.TODO(), db, cache, *proj, wr, &sdk.WorkflowRunPostHandlerOption{Manual: &sdk.WorkflowNodeRunManual{}}, consumer, nil)
+	_, err = workflow.StartWorkflowRun(context.TODO(), db, cache, *proj, wr, &sdk.WorkflowRunPostHandlerOption{Manual: &sdk.WorkflowNodeRunManual{}}, *consumer, nil)
 	require.NoError(t, err)
 
 	wrUpdated, err := workflow.LoadRun(context.TODO(), db, proj.Key, wr.Workflow.Name, wr.Number, workflow.LoadRunOptions{})
@@ -124,7 +124,7 @@ func TestProcessJoinCustomCondition(t *testing.T) {
 	require.NoError(t, workflow.Insert(context.TODO(), db, cache, *proj, &wr.Workflow))
 
 	// Create run
-	wrr, err := workflow.CreateRun(db.DbMap, &wr.Workflow, nil, u)
+	wrr, err := workflow.CreateRun(db.DbMap, &wr.Workflow, sdk.WorkflowRunPostHandlerOption{AuthConsumerID: consumer.ID})
 	require.NoError(t, err)
 	wr.ID = wrr.ID
 	wr.WorkflowID = wr.Workflow.ID
@@ -132,7 +132,7 @@ func TestProcessJoinCustomCondition(t *testing.T) {
 	require.NoError(t, workflow.UpdateWorkflowRun(context.TODO(), db, wr))
 
 	// Start run
-	_, err = workflow.StartWorkflowRun(context.TODO(), db, cache, *proj, wr, &sdk.WorkflowRunPostHandlerOption{Manual: &sdk.WorkflowNodeRunManual{}}, consumer, nil)
+	_, err = workflow.StartWorkflowRun(context.TODO(), db, cache, *proj, wr, &sdk.WorkflowRunPostHandlerOption{Manual: &sdk.WorkflowNodeRunManual{}}, *consumer, nil)
 	require.NoError(t, err)
 
 	wrUpdated, err := workflow.LoadRun(context.TODO(), db, proj.Key, wr.Workflow.Name, wr.Number, workflow.LoadRunOptions{})

@@ -3,6 +3,7 @@ package cdsclient
 import (
 	"archive/tar"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
@@ -47,6 +48,7 @@ type Admin interface {
 	AdminCDSMigrationList() ([]sdk.Migration, error)
 	AdminCDSMigrationCancel(id int64) error
 	AdminCDSMigrationReset(id int64) error
+	AdminWorkflowUpdateMaxRuns(projectKey string, workflowName string, maxRuns int64) error
 	Features() ([]sdk.Feature, error)
 	FeatureCreate(f sdk.Feature) error
 	FeatureDelete(name string) error
@@ -148,8 +150,8 @@ type EnvironmentVariableClient interface {
 
 // EventsClient listen SSE Events from CDS API
 type EventsClient interface {
-	// Must be  run in a go routine
-	WebsocketEventsListen(ctx context.Context, chanMsgToSend <-chan []sdk.WebsocketFilter, chanMsgReceived chan<- sdk.WebsocketEvent)
+	// Must be run in a go routine
+	WebsocketEventsListen(ctx context.Context, goRoutines *sdk.GoRoutines, chanMsgToSend <-chan []sdk.WebsocketFilter, chanMsgReceived chan<- sdk.WebsocketEvent, chanErrorReceived chan<- error)
 }
 
 // DownloadClient exposes download related functions
@@ -245,9 +247,9 @@ type ProjectVariablesClient interface {
 type QueueClient interface {
 	QueueWorkflowNodeJobRun(status ...string) ([]sdk.WorkflowNodeJobRun, error)
 	QueueCountWorkflowNodeJobRun(since *time.Time, until *time.Time, modelType string, ratioService *int) (sdk.WorkflowNodeJobRunCount, error)
-	QueuePolling(ctx context.Context, jobs chan<- sdk.WorkflowNodeJobRun, errs chan<- error, delay time.Duration, modelType string, ratioService *int) error
+	QueuePolling(ctx context.Context, goRoutines *sdk.GoRoutines, jobs chan<- sdk.WorkflowNodeJobRun, errs chan<- error, delay time.Duration, modelType string, ratioService *int) error
 	QueueTakeJob(ctx context.Context, job sdk.WorkflowNodeJobRun) (*sdk.WorkflowNodeJobRunData, error)
-	QueueJobBook(ctx context.Context, id int64) error
+	QueueJobBook(ctx context.Context, id int64) (sdk.WorkflowNodeJobRunBooked, error)
 	QueueJobRelease(ctx context.Context, id int64) error
 	QueueJobInfo(ctx context.Context, id int64) (*sdk.WorkflowNodeJobRun, error)
 	QueueJobSendSpawnInfo(ctx context.Context, id int64, in []sdk.SpawnInfo) error
@@ -261,6 +263,7 @@ type QueueClient interface {
 	QueueStaticFilesUpload(ctx context.Context, projectKey, integrationName string, nodeJobRunID int64, name, entrypoint, staticKey string, tarContent io.Reader) (string, bool, time.Duration, error)
 	QueueJobTag(ctx context.Context, jobID int64, tags []sdk.WorkflowRunTag) error
 	QueueServiceLogs(ctx context.Context, logs []sdk.ServiceLog) error
+	QueueJobSetVersion(ctx context.Context, jobID int64, version sdk.WorkflowRunVersion) error
 }
 
 // UserClient exposes users functions
@@ -306,6 +309,7 @@ type ServiceClient interface {
 // WorkflowClient exposes workflows functions
 type WorkflowClient interface {
 	WorkflowSearch(opts ...RequestModifier) ([]sdk.Workflow, error)
+	WorkflowRunsAndNodesIDs(projectkey string) ([]sdk.WorkflowNodeRunIdentifiers, error)
 	WorkflowList(projectKey string, opts ...RequestModifier) ([]sdk.Workflow, error)
 	WorkflowGet(projectKey, name string, opts ...RequestModifier) (*sdk.Workflow, error)
 	WorkflowUpdate(projectKey, name string, wf *sdk.Workflow) error
@@ -328,7 +332,12 @@ type WorkflowClient interface {
 	WorkflowNodeStop(projectKey string, workflowName string, number, fromNodeID int64) (*sdk.WorkflowNodeRun, error)
 	WorkflowNodeRun(projectKey string, name string, number int64, nodeRunID int64) (*sdk.WorkflowNodeRun, error)
 	WorkflowNodeRunArtifactDownload(projectKey string, name string, a sdk.WorkflowNodeRunArtifact, w io.Writer) error
-	WorkflowNodeRunJobStep(projectKey string, workflowName string, number int64, nodeRunID, job int64, step int) (*sdk.BuildState, error)
+	WorkflowNodeRunJobStepLink(ctx context.Context, projectKey string, workflowName string, nodeRunID, job int64, step int64) (*sdk.CDNLogLink, error)
+	WorkflowNodeRunJobStepLog(ctx context.Context, projectKey string, workflowName string, nodeRunID, job int64, step int64) (*sdk.BuildState, error)
+	WorkflowNodeRunJobServiceLink(ctx context.Context, projectKey string, workflowName string, nodeRunID, job int64, serviceName string) (*sdk.CDNLogLink, error)
+	WorkflowNodeRunJobServiceLog(ctx context.Context, projectKey string, workflowName string, nodeRunID, job int64, serviceName string) (*sdk.ServiceLog, error)
+	WorkflowLogAccess(ctx context.Context, projectKey, workflowName, sessionID string) error
+	WorkflowLogDownload(ctx context.Context, link sdk.CDNLogLink) ([]byte, error)
 	WorkflowNodeRunRelease(projectKey string, workflowName string, runNumber int64, nodeRunID int64, release sdk.WorkflowNodeRunRelease) error
 	WorkflowAllHooksList() ([]sdk.NodeHook, error)
 	WorkflowCachePush(projectKey, integrationName, ref string, tarContent io.Reader, size int) error
@@ -368,6 +377,7 @@ type Interface interface {
 	EnvironmentClient
 	EventsClient
 	ExportImportInterface
+	FeatureEnabled(name string, params map[string]string) (sdk.FeatureEnabledResponse, error)
 	GroupClient
 	GRPCPluginsClient
 	BroadcastClient
@@ -381,7 +391,7 @@ type Interface interface {
 	RepositoriesManagerInterface
 	ServiceClient
 	ServiceRegister(context.Context, sdk.Service) (*sdk.Service, error)
-	ServiceHeartbeat(sdk.MonitoringStatus) error
+	ServiceHeartbeat(*sdk.MonitoringStatus) error
 	UserClient
 	WorkerClient
 	WorkflowClient
@@ -389,6 +399,7 @@ type Interface interface {
 	HookClient
 	Version() (*sdk.Version, error)
 	TemplateClient
+	WebsocketClient
 }
 
 type WorkerInterface interface {
@@ -401,7 +412,7 @@ type WorkerInterface interface {
 	WorkflowRunArtifacts(projectKey string, name string, number int64) ([]sdk.WorkflowNodeRunArtifact, error)
 	WorkflowCachePush(projectKey, integrationName, ref string, tarContent io.Reader, size int) error
 	WorkflowCachePull(projectKey, integrationName, ref string) (io.Reader, error)
-	WorkflowRunSearch(projectKey string, offset, limit int64, filter ...Filter) ([]sdk.WorkflowRun, error)
+	WorkflowRunList(projectKey string, workflowName string, offset, limit int64) ([]sdk.WorkflowRun, error)
 	WorkflowNodeRunArtifactDownload(projectKey string, name string, a sdk.WorkflowNodeRunArtifact, w io.Writer) error
 	WorkflowNodeRunRelease(projectKey string, workflowName string, runNumber int64, nodeRunID int64, release sdk.WorkflowNodeRunRelease) error
 }
@@ -561,5 +572,10 @@ type AuthClient interface {
 	AuthConsumerCreateForUser(username string, request sdk.AuthConsumer) (sdk.AuthConsumerCreateResponse, error)
 	AuthSessionListByUser(username string) (sdk.AuthSessions, error)
 	AuthSessionDelete(username, id string) error
+	AuthSessionGet(id string) (sdk.AuthCurrentConsumerResponse, error)
 	AuthMe() (sdk.AuthCurrentConsumerResponse, error)
+}
+
+type WebsocketClient interface {
+	RequestWebsocket(ctx context.Context, goRoutines *sdk.GoRoutines, path string, msgToSend <-chan json.RawMessage, msgReceived chan<- json.RawMessage, errorReceived chan<- error) error
 }

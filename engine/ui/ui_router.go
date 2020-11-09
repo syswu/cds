@@ -20,20 +20,23 @@ func (s *Service) initRouter(ctx context.Context) {
 	r := s.Router
 	r.Background = ctx
 	r.URL = s.Cfg.URL
-	r.SetHeaderFunc = api.DefaultHeaders
+	r.SetHeaderFunc = service.DefaultHeaders
+	r.DefaultAuthMiddleware = service.NoAuthMiddleware
 	r.PostMiddlewares = append(r.PostMiddlewares, api.TracingPostMiddleware)
 
-	r.Handle(s.Cfg.DeployURL+"/mon/version", nil, r.GET(api.VersionHandler, api.Auth(false)))
-	r.Handle(s.Cfg.DeployURL+"/mon/status", nil, r.GET(s.statusHandler, api.Auth(false)))
-	r.Handle(s.Cfg.DeployURL+"/mon/metrics", nil, r.GET(service.GetPrometheustMetricsHandler(s), api.Auth(false)))
-	r.Handle(s.Cfg.DeployURL+"/mon/metrics/all", nil, r.GET(service.GetMetricsHandler, api.Auth(false)))
+	r.Handle(s.Cfg.DeployURL+"/mon/version", nil, r.GET(service.VersionHandler))
+	r.Handle(s.Cfg.DeployURL+"/mon/status", nil, r.GET(s.statusHandler))
+	r.Handle(s.Cfg.DeployURL+"/mon/metrics", nil, r.GET(service.GetPrometheustMetricsHandler(s)))
+	r.Handle(s.Cfg.DeployURL+"/mon/metrics/all", nil, r.GET(service.GetMetricsHandler))
 
 	// proxypass
 	r.Mux.PathPrefix(s.Cfg.DeployURL + "/cdsapi").Handler(s.getReverseProxy(s.Cfg.DeployURL+"/cdsapi", s.Cfg.API.HTTP.URL))
 	r.Mux.PathPrefix(s.Cfg.DeployURL + "/cdshooks").Handler(s.getReverseProxy(s.Cfg.DeployURL+"/cdshooks", s.Cfg.HooksURL))
+	r.Mux.PathPrefix(s.Cfg.DeployURL + "/cdscdn").Handler(s.getReverseProxy(s.Cfg.DeployURL+"/cdscdn", s.Cfg.CDNURL))
 
 	// serve static UI files
-	r.Mux.PathPrefix("/").Handler(s.uiServe(http.Dir(s.HTMLDir)))
+	r.Mux.PathPrefix("/docs").Handler(s.uiServe(http.Dir(s.DocsDir), s.DocsDir))
+	r.Mux.PathPrefix("/").Handler(s.uiServe(http.Dir(s.HTMLDir), s.HTMLDir))
 }
 
 func (s *Service) getReverseProxy(path, urlRemote string) *httputil.ReverseProxy {
@@ -57,14 +60,18 @@ func (s *Service) getReverseProxy(path, urlRemote string) *httputil.ReverseProxy
 	return &httputil.ReverseProxy{Director: director}
 }
 
-func (s *Service) uiServe(fs http.FileSystem) http.Handler {
+func (s *Service) uiServe(fs http.FileSystem, dir string) http.Handler {
 	fsh := http.FileServer(fs)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.URL.Path = strings.TrimPrefix(r.URL.Path, s.Cfg.DeployURL)
+		if dir == s.DocsDir {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/docs")
+		} else {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, s.Cfg.DeployURL)
+		}
 		filePath := path.Clean(r.URL.Path)
 		_, err := fs.Open(filePath)
 		if os.IsNotExist(err) {
-			http.ServeFile(w, r, filepath.Join(s.HTMLDir, "index.html"))
+			http.ServeFile(w, r, filepath.Join(dir, "index.html"))
 			return
 		}
 		fsh.ServeHTTP(w, r)

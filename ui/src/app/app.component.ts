@@ -18,11 +18,12 @@ import { AppService } from './app.service';
 import { AuthentifiedUser } from './model/user.model';
 import { LanguageStore } from './service/language/language.store';
 import { NotificationService } from './service/notification/notification.service';
-import { MonitoringService } from './service/services.module';
+import { HelpService, MonitoringService } from './service/services.module';
 import { ThemeStore } from './service/theme/theme.store';
 import { AutoUnsubscribe } from './shared/decorator/autoUnsubscribe';
 import { ToastService } from './shared/toast/ToastService';
 import { AuthenticationState } from './store/authentication.state';
+import { AddHelp } from './store/help.action';
 
 declare var PACMAN: any;
 
@@ -34,6 +35,7 @@ declare var PACMAN: any;
 @AutoUnsubscribe()
 export class AppComponent implements OnInit, OnDestroy {
     open: boolean;
+    isAPIAvailable: boolean;
     isConnected: boolean;
     hideNavBar: boolean;
     heartbeatToken: number;
@@ -44,7 +46,6 @@ export class AppComponent implements OnInit, OnDestroy {
     versionWorkerSubscription: Subscription;
     _routerSubscription: Subscription;
     _routerNavEndSubscription: Subscription;
-    _sseSubscription: Subscription;
     displayResolver: boolean;
     toasterConfigDefault: any;
     toasterConfigErrorHTTP: any;
@@ -73,9 +74,11 @@ export class AppComponent implements OnInit, OnDestroy {
         private _toastService: ToastService,
         private _store: Store,
         private _eventService: EventService,
+        private _helpService: HelpService,
         private _ngZone: NgZone,
         private _monitoringService: MonitoringService
     ) {
+        this.isAPIAvailable = false;
         this.zone = new NgZone({ enableLongStackTrace: false });
         this.toasterConfigDefault = this._toastService.getConfigDefault();
         this.toasterConfigErrorHTTP = this._toastService.getConfigErrorHTTP();
@@ -114,6 +117,20 @@ export class AppComponent implements OnInit, OnDestroy {
     ngOnDestroy(): void {} // Should be set to use @AutoUnsubscribe with AOT
 
     ngOnInit(): void {
+        this._monitoringService.getStatus().subscribe(
+            (data) => {
+                this.isAPIAvailable = true;
+                this.load();
+            },
+            err => {
+                this.isAPIAvailable = false;
+                setTimeout(() => { window.location.reload() }, 30000);
+            }
+        );
+    }
+
+    load(): void {
+        this._helpService.getHelp().subscribe(h => this._store.dispatch(new AddHelp(h)));
         this._store.dispatch(new GetCDSStatus());
         this._store.select(AuthenticationState.user).subscribe(user => {
             if (!user) {

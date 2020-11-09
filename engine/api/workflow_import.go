@@ -82,7 +82,7 @@ func (api *API) postWorkflowImportHandler() service.Handler {
 	return func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 		vars := mux.Vars(r)
 		key := vars[permProjectKey]
-		force := FormBool(r, "force")
+		force := service.FormBool(r, "force")
 
 		body, err := ioutil.ReadAll(r.Body)
 		if err != nil {
@@ -140,10 +140,6 @@ func (api *API) postWorkflowImportHandler() service.Handler {
 		wrkflw, msgList, globalError := workflow.ParseAndImport(ctx, tx, api.Cache, *proj, wf, ew, getAPIConsumer(ctx), workflow.ImportOptions{Force: force})
 		msgListString := translate(r, msgList)
 		if globalError != nil {
-			if len(msgListString) != 0 {
-				sdkErr := sdk.ExtractHTTPError(globalError, r.Header.Get("Accept-Language"))
-				return service.WriteJSON(w, append(msgListString, sdkErr.Message), sdkErr.Status)
-			}
 			if len(msgListString) != 0 {
 				sdkErr := sdk.ExtractHTTPError(globalError, r.Header.Get("Accept-Language"))
 				return service.WriteJSON(w, append(msgListString, sdkErr.Message), sdkErr.Status)
@@ -281,7 +277,7 @@ func (api *API) postWorkflowPushHandler() service.Handler {
 			pushOptions = &workflow.PushOption{
 				FromRepository:  r.Header.Get(sdk.WorkflowAsCodeHeader),
 				IsDefaultBranch: true,
-				Force:           FormBool(r, "force"),
+				Force:           service.FormBool(r, "force"),
 			}
 		}
 

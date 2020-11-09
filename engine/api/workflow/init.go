@@ -6,17 +6,19 @@ import (
 
 	"github.com/go-gorp/gorp"
 
-	"github.com/ovh/cds/engine/api/cache"
+	"github.com/ovh/cds/engine/cache"
 	"github.com/ovh/cds/sdk/log"
 )
 
 var baseUIURL, defaultOS, defaultArch string
+var maxRuns int64
 
 //Initialize starts goroutines for workflows
-func Initialize(ctx context.Context, DBFunc func() *gorp.DbMap, store cache.Store, uiURL, confDefaultOS, confDefaultArch string, maxLogSize int64) {
+func Initialize(ctx context.Context, DBFunc func() *gorp.DbMap, store cache.Store, uiURL, confDefaultOS, confDefaultArch string, maxLogSize int64, confMaxRuns int64) {
 	baseUIURL = uiURL
 	defaultOS = confDefaultOS
 	defaultArch = confDefaultArch
+	maxRuns = confMaxRuns
 	tickStop := time.NewTicker(30 * time.Minute)
 	tickHeart := time.NewTicker(10 * time.Second)
 	defer tickHeart.Stop()

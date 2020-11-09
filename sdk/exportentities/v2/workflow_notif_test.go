@@ -94,6 +94,8 @@ notifications:
   settings:
     template:
       disable_comment: true
+- type: event
+  integration: my-integration
 `,
 			},
 		},
@@ -187,8 +189,7 @@ notifications:
     recipients:
     - a
     template:
-      subject: '{{.cds.project}}/{{.cds.application}} {{.cds.pipeline}} {{.cds.environment}}#{{.cds.version}}
-        {{.cds.status}}'
+      subject: '{{.cds.project}}/{{.cds.application}} {{.cds.pipeline}} {{.cds.environment}}#{{.cds.version}} {{.cds.status}}'
       body: |-
         Project : {{.cds.project}}
         Application : {{.cds.application}}
@@ -203,8 +204,7 @@ notifications:
   - test_2
   settings:
     template:
-      subject: '{{.cds.project}}/{{.cds.application}} {{.cds.pipeline}} {{.cds.environment}}#{{.cds.version}}
-        {{.cds.status}}'
+      subject: '{{.cds.project}}/{{.cds.application}} {{.cds.pipeline}} {{.cds.environment}}#{{.cds.version}} {{.cds.status}}'
       body: |-
         Project : {{.cds.project}}
         Application : {{.cds.application}}
@@ -213,6 +213,8 @@ notifications:
         Details : {{.cds.buildURL}}
         Triggered by : {{.cds.triggered_by.username}}
         Branch : {{.git.branch}}
+- type: event
+  integration: my-integration
 `,
 		},
 		{
@@ -230,6 +232,8 @@ workflow:
     pipeline: test
 notifications:
 - type: jabber
+- type: event
+  integration: my-integration
 `,
 		},
 	}

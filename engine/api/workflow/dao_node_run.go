@@ -8,11 +8,12 @@ import (
 	"time"
 
 	"github.com/go-gorp/gorp"
+	"github.com/lib/pq"
 	"github.com/ovh/venom"
 
-	"github.com/ovh/cds/engine/api/cache"
 	"github.com/ovh/cds/engine/api/database/gorpmapping"
 	"github.com/ovh/cds/engine/api/repositoriesmanager"
+	"github.com/ovh/cds/engine/cache"
 	"github.com/ovh/cds/engine/gorpmapper"
 	"github.com/ovh/cds/sdk"
 	"github.com/ovh/cds/sdk/log"
@@ -57,8 +58,25 @@ workflow_node_run.callback
 const nodeRunTestsField string = ", workflow_node_run.tests"
 const withLightNodeRunTestsField string = ", json_build_object('ko', workflow_node_run.tests->'ko', 'ok', workflow_node_run.tests->'ok', 'skipped', workflow_node_run.tests->'skipped', 'total', workflow_node_run.tests->'total') AS tests"
 
+func LoadNodeRunIDs(db gorp.SqlExecutor, wIDs []int64) ([]sdk.WorkflowNodeRunIdentifiers, error) {
+	query := `
+		SELECT workflow_run.id, workflow_run.workflow_id, workflow.name, workflow_run.num, workflow_node_run.id as node_run_id
+		FROM workflow_run
+		JOIN workflow ON workflow.id = workflow_run.workflow_id
+		JOIN workflow_node_run ON workflow_node_run.workflow_run_id = workflow_run.id
+		WHERE workflow_run.workflow_id = ANY($1)
+		ORDER BY workflow_id, id, node_run_id;
+	`
+
+	var ids []sdk.WorkflowNodeRunIdentifiers
+	if _, err := db.Select(&ids, query, pq.Int64Array(wIDs)); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 //LoadNodeRun load a specific node run on a workflow
-func LoadNodeRun(db gorp.SqlExecutor, projectkey, workflowname string, number, id int64, loadOpts LoadRunOptions) (*sdk.WorkflowNodeRun, error) {
+func LoadNodeRun(db gorp.SqlExecutor, projectkey, workflowname string, id int64, loadOpts LoadRunOptions) (*sdk.WorkflowNodeRun, error) {
 	var rr = NodeRun{}
 	var testsField string
 	if loadOpts.WithTests {
@@ -74,11 +92,10 @@ func LoadNodeRun(db gorp.SqlExecutor, projectkey, workflowname string, number, i
 	join workflow on workflow.id = workflow_run.workflow_id
 	where project.projectkey = $1
 	and workflow.name = $2
-	and workflow_run.num = $3
-	and workflow_node_run.id = $4`, nodeRunFields, testsField)
+	and workflow_node_run.id = $3`, nodeRunFields, testsField)
 
-	if err := db.SelectOne(&rr, query, projectkey, workflowname, number, id); err != nil {
-		return nil, sdk.WrapError(err, "Unable to load workflow_node_run proj=%s, workflow=%s, num=%d, node=%d", projectkey, workflowname, number, id)
+	if err := db.SelectOne(&rr, query, projectkey, workflowname, id); err != nil {
+		return nil, sdk.WrapError(err, "Unable to load workflow_node_run proj=%s, workflow=%s, node=%d", projectkey, workflowname, id)
 	}
 
 	r, err := fromDBNodeRun(rr, loadOpts)
@@ -182,6 +199,29 @@ func LoadAndLockNodeRunByID(ctx context.Context, db gorp.SqlExecutor, id int64) 
 			return nil, sdk.WithStack(sdk.ErrLocked)
 		}
 		return nil, sdk.WrapError(err, "unable to load workflow_node_run node=%d", id)
+	}
+	return fromDBNodeRun(rr, LoadRunOptions{})
+}
+
+//LoadAndLockNodeRunByJobID load and lock a specific node run on a workflow
+func LoadAndLockNodeRunByJobID(ctx context.Context, db gorp.SqlExecutor, jobID int64) (*sdk.WorkflowNodeRun, error) {
+	var end func()
+	_, end = telemetry.Span(ctx, "workflow.LoadAndLockNodeRunByJobID")
+	defer end()
+
+	var rr = NodeRun{}
+
+	query := fmt.Sprintf(`
+    SELECT %s %s
+    FROM workflow_node_run
+    JOIN workflow_node_run_job on workflow_node_run.id = workflow_node_run_job.workflow_node_run_id
+    WHERE workflow_node_run_job.id = $1 FOR UPDATE SKIP LOCKED
+  `, nodeRunFields, nodeRunTestsField)
+	if err := db.SelectOne(&rr, query, jobID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, sdk.WithStack(sdk.ErrLocked)
+		}
+		return nil, sdk.WrapError(err, "unable to load workflow_node_run with jobID=%d", jobID)
 	}
 	return fromDBNodeRun(rr, LoadRunOptions{})
 }
@@ -539,7 +579,7 @@ func UpdateNodeRun(db gorp.SqlExecutor, n *sdk.WorkflowNodeRun) error {
 }
 
 // GetNodeRunBuildCommits gets commits for given node run and return current vcs info
-func GetNodeRunBuildCommits(ctx context.Context, db gorpmapper.SqlExecutorWithTx, store cache.Store, proj sdk.Project, wf *sdk.Workflow, wNodeName string, number int64, nodeRun *sdk.WorkflowNodeRun, app *sdk.Application, env *sdk.Environment) ([]sdk.VCSCommit, sdk.BuildNumberAndHash, error) {
+func GetNodeRunBuildCommits(ctx context.Context, db gorpmapper.SqlExecutorWithTx, store cache.Store, proj sdk.Project, wf sdk.Workflow, wNodeName string, number int64, nodeRun *sdk.WorkflowNodeRun, app *sdk.Application, env *sdk.Environment) ([]sdk.VCSCommit, sdk.BuildNumberAndHash, error) {
 	var cur sdk.BuildNumberAndHash
 	if app == nil {
 		log.Debug("GetNodeRunBuildCommits> No app linked")
@@ -729,7 +769,7 @@ func PreviousNodeRun(db gorp.SqlExecutor, nr sdk.WorkflowNodeRun, nodeName strin
 //for the current node run and the previous one on the same branch.
 //Returned value may be zero if node run are not found
 //If you don't have environment linked set envID to 0 or -1
-func PreviousNodeRunVCSInfos(ctx context.Context, db gorp.SqlExecutor, projectKey string, wf *sdk.Workflow, nodeName string, current sdk.BuildNumberAndHash, appID int64, envID int64) (sdk.BuildNumberAndHash, error) {
+func PreviousNodeRunVCSInfos(ctx context.Context, db gorp.SqlExecutor, projectKey string, wf sdk.Workflow, nodeName string, current sdk.BuildNumberAndHash, appID int64, envID int64) (sdk.BuildNumberAndHash, error) {
 	var previous sdk.BuildNumberAndHash
 	var prevHash, prevBranch, prevTag, prevRepository sql.NullString
 	var previousBuildNumber sql.NullInt64

@@ -51,7 +51,9 @@ type Configuration struct {
 
 // New instanciates a new API object
 func New() service.Service {
-	return &dbmigservice{}
+	s := &dbmigservice{}
+	s.GoRoutines = sdk.NewGoRoutines()
+	return s
 }
 
 func (s *dbmigservice) Init(config interface{}) (cdsclient.ServiceConfig, error) {
@@ -142,17 +144,17 @@ func (s *dbmigservice) Serve(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (s *dbmigservice) Status(ctx context.Context) sdk.MonitoringStatus {
-	response := s.CommonMonitoring()
+func (s *dbmigservice) Status(ctx context.Context) *sdk.MonitoringStatus {
+	m := s.NewMonitoringStatus()
 	if s.currentStatus.err != nil {
-		response.Lines = append(response.Lines,
+		m.AddLine(
 			sdk.MonitoringStatusLine{
 				Component: "SQL",
 				Value:     s.currentStatus.err.Error(),
 				Status:    sdk.MonitoringStatusAlert,
 			},
 		)
-		return response
+		return m
 	}
 
 	var theNumberOfSuccessfulMigations int
@@ -167,7 +169,7 @@ func (s *dbmigservice) Status(ctx context.Context) sdk.MonitoringStatus {
 		status = sdk.MonitoringStatusOK
 	}
 
-	response.Lines = append(response.Lines,
+	m.AddLine(
 		sdk.MonitoringStatusLine{
 			Component: "SQL",
 			Value:     fmt.Sprintf("%d/%d", theNumberOfSuccessfulMigations, len(s.currentStatus.migrations)),
@@ -175,18 +177,19 @@ func (s *dbmigservice) Status(ctx context.Context) sdk.MonitoringStatus {
 		},
 	)
 
-	return response
+	return m
 }
 
 func (s *dbmigservice) initRouter(ctx context.Context) {
 	log.Debug("DBMigrate> Router initialized")
 	r := s.Router
-	r.SetHeaderFunc = api.DefaultHeaders
-	r.Middlewares = append(r.Middlewares, service.CheckRequestSignatureMiddleware(s.ParsedAPIPublicKey))
+	r.SetHeaderFunc = service.DefaultHeaders
+	r.DefaultAuthMiddleware = service.CheckRequestSignatureMiddleware(s.ParsedAPIPublicKey)
 
-	r.Handle("/mon/version", nil, r.GET(api.VersionHandler, api.Auth(false)))
-	r.Handle("/mon/status", nil, r.GET(s.statusHandler, api.Auth(false)))
-	r.Handle("/mon/metrics", nil, r.GET(service.GetPrometheustMetricsHandler(s), api.Auth(false)))
-	r.Handle("/mon/metrics/all", nil, r.GET(service.GetMetricsHandler, api.Auth(false)))
-	r.Handle("/", nil, r.GET(s.getMigrationHandler, api.Auth(false)))
+	r.Handle("/mon/version", nil, r.GET(service.VersionHandler, service.OverrideAuth(service.NoAuthMiddleware)))
+	r.Handle("/mon/status", nil, r.GET(s.statusHandler, service.OverrideAuth(service.NoAuthMiddleware)))
+	r.Handle("/mon/metrics", nil, r.GET(service.GetPrometheustMetricsHandler(s), service.OverrideAuth(service.NoAuthMiddleware)))
+	r.Handle("/mon/metrics/all", nil, r.GET(service.GetMetricsHandler, service.OverrideAuth(service.NoAuthMiddleware)))
+
+	r.Handle("/", nil, r.GET(s.getMigrationHandler, service.OverrideAuth(service.NoAuthMiddleware)))
 }

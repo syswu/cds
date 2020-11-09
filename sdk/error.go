@@ -198,6 +198,9 @@ var (
 	ErrUnsupportedMediaType                          = Error{ID: 188, Status: http.StatusUnsupportedMediaType}
 	ErrNothingToPush                                 = Error{ID: 189, Status: http.StatusBadRequest}
 	ErrWorkerErrorCommand                            = Error{ID: 190, Status: http.StatusBadRequest}
+	ErrRepoAnalyzeFailed                             = Error{ID: 191, Status: http.StatusInternalServerError}
+	ErrConflictData                                  = Error{ID: 192, Status: http.StatusConflict}
+	ErrWebsocketUpgrade                              = Error{ID: 193, Status: http.StatusUpgradeRequired}
 )
 
 var errorsAmericanEnglish = map[int]string{
@@ -378,6 +381,9 @@ var errorsAmericanEnglish = map[int]string{
 	ErrUnsupportedMediaType.ID:                          "Request format invalid",
 	ErrNothingToPush.ID:                                 "No diff to push",
 	ErrWorkerErrorCommand.ID:                            "Worker command in error",
+	ErrRepoAnalyzeFailed.ID:                             "Unable to analyse repository",
+	ErrConflictData.ID:                                  "Data conflict",
+	ErrWebsocketUpgrade.ID:                              "Websocket upgrade required",
 }
 
 var errorsFrench = map[int]string{
@@ -558,6 +564,9 @@ var errorsFrench = map[int]string{
 	ErrUnsupportedMediaType.ID:                          "Le format de la requête est invalide",
 	ErrNothingToPush.ID:                                 "Aucune modification à pousser",
 	ErrWorkerErrorCommand.ID:                            "Commande du worker en erreur",
+	ErrRepoAnalyzeFailed.ID:                             "L'analyse du repository a echoué",
+	ErrConflictData.ID:                                  "Donnée en conflit",
+	ErrWebsocketUpgrade.ID:                              "Websocket upgrade requis",
 }
 
 // Error type.
@@ -614,13 +623,10 @@ func (e Error) Translate(al string) string {
 	switch tag {
 	case language.French:
 		msg, ok = errorsFrench[e.ID]
-		break
 	case language.AmericanEnglish:
 		msg, ok = errorsAmericanEnglish[e.ID]
-		break
 	default:
 		msg, ok = errorsAmericanEnglish[e.ID]
-		break
 	}
 	if !ok {
 		return errorsAmericanEnglish[ErrUnknownError.ID]
@@ -805,10 +811,20 @@ func WrapError(err error, format string, args ...interface{}) error {
 		}
 	}
 
+	httpError := ErrUnknownError
+
+	if e, ok := err.(*MultiError); ok {
+		var ss []string
+		for i := range *e {
+			ss = append(ss, ExtractHTTPError((*e)[i], "").printLight())
+		}
+		httpError.From = strings.Join(ss, ", ")
+	}
+
 	return errorWithStack{
 		root:      errors.Wrap(err, m),
 		stack:     callers(),
-		httpError: ErrUnknownError,
+		httpError: httpError,
 	}
 }
 
@@ -955,9 +971,7 @@ func (e *MultiError) Error() string {
 
 // Join joins errors from MultiError to another errors MultiError
 func (e *MultiError) Join(j MultiError) {
-	for _, err := range j {
-		*e = append(*e, err)
-	}
+	*e = append(*e, j...)
 }
 
 // Append appends an error to a MultiError

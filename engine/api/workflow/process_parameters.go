@@ -36,7 +36,7 @@ func getNodeJobRunParameters(j sdk.Job, run *sdk.WorkflowNodeRun, stage *sdk.Sta
 }
 
 // getBuildParameterFromNodeContext returns the parameters compute from  node context (project, application,  pipeline, pyaload)
-func getBuildParameterFromNodeContext(proj sdk.Project, w *sdk.Workflow, runContext nodeRunContext, pipelineParameters []sdk.Parameter, payload interface{}, hookEvent *sdk.WorkflowNodeRunHookEvent) ([]sdk.Parameter, error) {
+func getBuildParameterFromNodeContext(proj sdk.Project, w sdk.Workflow, runContext nodeRunContext, pipelineParameters []sdk.Parameter, payload interface{}, hookEvent *sdk.WorkflowNodeRunHookEvent) ([]sdk.Parameter, error) {
 	tmpProj := sdk.ParametersFromProjectVariables(proj)
 	vars := make(map[string]string, len(tmpProj))
 	for k, v := range tmpProj {
@@ -220,7 +220,7 @@ func getNodeRunBuildParameters(ctx context.Context, proj sdk.Project, wr *sdk.Wo
 	defer end()
 
 	// GET PARAMETER FROM NODE CONTEXT
-	params, errparam := getBuildParameterFromNodeContext(proj, &wr.Workflow, runContext, run.PipelineParameters, run.Payload, run.HookEvent)
+	params, errparam := getBuildParameterFromNodeContext(proj, wr.Workflow, runContext, run.PipelineParameters, run.Payload, run.HookEvent)
 	if errparam != nil {
 		return nil, sdk.WrapError(errparam, "unable to compute node build parameters")
 	}
@@ -228,7 +228,11 @@ func getNodeRunBuildParameters(ctx context.Context, proj sdk.Project, wr *sdk.Wo
 	errm := &sdk.MultiError{}
 	//override default parameters value
 	tmp := sdk.ParametersToMap(params)
-	tmp["cds.version"] = fmt.Sprintf("%d", run.Number)
+	if wr.Version != nil {
+		tmp["cds.version"] = *wr.Version
+	} else {
+		tmp["cds.version"] = fmt.Sprintf("%d", run.Number)
+	}
 	tmp["cds.run"] = fmt.Sprintf("%d.%d", run.Number, run.SubNumber)
 	tmp["cds.run.number"] = fmt.Sprintf("%d", run.Number)
 	tmp["cds.run.subnumber"] = fmt.Sprintf("%d", run.SubNumber)

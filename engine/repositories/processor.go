@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sirupsen/logrus"
-
 	"github.com/ovh/cds/sdk"
 	"github.com/ovh/cds/sdk/log"
 )
@@ -23,7 +21,7 @@ func (s *Service) processor(ctx context.Context) error {
 			ctx = context.WithValue(ctx, log.ContextLoggingRequestIDKey, op.RequestID)
 			if err := s.do(ctx, *op); err != nil {
 				if err == errLockUnavailable {
-					sdk.GoRoutine(ctx, "operation "+uuid+" retry", func(ctx context.Context) {
+					s.GoRoutines.Exec(ctx, "operation "+uuid+" retry", func(ctx context.Context) {
 						op.NbRetries++
 						log.Info(ctx, "repositories > processor > lock unavailable. retry")
 						time.Sleep(time.Duration(2*op.NbRetries) * time.Second)
@@ -56,7 +54,7 @@ func (s *Service) do(ctx context.Context, op sdk.Operation) error {
 	case op.Setup.Checkout.Branch != "" || op.Setup.Checkout.Tag != "":
 		if err := s.processCheckout(ctx, &op); err != nil {
 			isErrWithStack := sdk.IsErrorWithStack(err)
-			fields := logrus.Fields{}
+			fields := log.Fields{}
 			if isErrWithStack {
 				fields["stack_trace"] = fmt.Sprintf("%+v", err)
 			}
@@ -71,7 +69,7 @@ func (s *Service) do(ctx context.Context, op sdk.Operation) error {
 			case op.LoadFiles.Pattern != "":
 				if err := s.processLoadFiles(ctx, &op); err != nil {
 					isErrWithStack := sdk.IsErrorWithStack(err)
-					fields := logrus.Fields{}
+					fields := log.Fields{}
 					if isErrWithStack {
 						fields["stack_trace"] = fmt.Sprintf("%+v", err)
 					}
@@ -92,7 +90,7 @@ func (s *Service) do(ctx context.Context, op sdk.Operation) error {
 	case op.Setup.Push.FromBranch != "":
 		if err := s.processPush(ctx, &op); err != nil {
 			isErrWithStack := sdk.IsErrorWithStack(err)
-			fields := logrus.Fields{}
+			fields := log.Fields{}
 			if isErrWithStack {
 				fields["stack_trace"] = fmt.Sprintf("%+v", err)
 			}
@@ -107,6 +105,12 @@ func (s *Service) do(ctx context.Context, op sdk.Operation) error {
 	default:
 		op.Error = sdk.ToOperationError(sdk.NewErrorFrom(sdk.ErrUnknownError, "unrecognized setup"))
 		op.Status = sdk.OperationStatusError
+	}
+
+	log.Debug("repositories > operation %s: %+v ", op.UUID, op.Error)
+	log.Info(ctx, "repositories > operation %s status: %v ", op.UUID, op.Status)
+	if op.Status == sdk.OperationStatusError {
+		log.Error(ctx, "repositories> operation %s error %s", op.UUID, op.Error.Message)
 	}
 
 	return s.dao.saveOperation(&op)

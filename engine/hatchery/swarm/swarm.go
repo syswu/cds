@@ -32,6 +32,7 @@ import (
 // New instanciates a new Hatchery Swarm
 func New() *HatcherySwarm {
 	s := new(HatcherySwarm)
+	s.GoRoutines = sdk.NewGoRoutines()
 	s.Router = &api.Router{
 		Mux: mux.NewRouter(),
 	}
@@ -178,7 +179,9 @@ func (h *HatcherySwarm) InitHatchery(ctx context.Context) error {
 	if err := h.RefreshServiceLogger(ctx); err != nil {
 		log.Error(ctx, "Hatchery> swarm> Cannot get cdn configuration : %v", err)
 	}
-	sdk.GoRoutine(context.Background(), "swarm", func(ctx context.Context) { h.routines(ctx) })
+	h.GoRoutines.Run(context.Background(), "swarm", func(ctx context.Context) {
+		h.routines(ctx)
+	})
 
 	return nil
 }
@@ -315,10 +318,17 @@ func (h *HatcherySwarm) SpawnWorker(ctx context.Context, spawnArgs hatchery.Spaw
 				}
 
 				if spawnArgs.JobID > 0 {
-					labels["service_node_run_id"] = fmt.Sprintf("%d", spawnArgs.NodeRunID)
-					labels["service_job_id"] = fmt.Sprintf("%d", spawnArgs.JobID)
-					labels["service_id"] = fmt.Sprintf("%d", r.ID)
-					labels["service_req_name"] = r.Name
+					labels[hatchery.LabelServiceProjectKey] = spawnArgs.ProjectKey
+					labels[hatchery.LabelServiceWorkflowName] = spawnArgs.WorkflowName
+					labels[hatchery.LabelServiceWorkflowID] = fmt.Sprintf("%d", spawnArgs.WorkflowID)
+					labels[hatchery.LabelServiceRunID] = fmt.Sprintf("%d", spawnArgs.RunID)
+					labels[hatchery.LabelServiceNodeRunID] = fmt.Sprintf("%d", spawnArgs.NodeRunID)
+					labels[hatchery.LabelServiceNodeRunName] = spawnArgs.NodeRunName
+					labels[hatchery.LabelServiceJobName] = spawnArgs.JobName
+					labels[hatchery.LabelServiceJobID] = fmt.Sprintf("%d", spawnArgs.JobID)
+					labels[hatchery.LabelServiceID] = fmt.Sprintf("%d", r.ID)
+					labels[hatchery.LabelServiceReqName] = r.Name
+
 				}
 
 				//Start the services
@@ -613,17 +623,17 @@ func (h *HatcherySwarm) routines(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			sdk.GoRoutine(ctx, "getServicesLogs", func(ctx context.Context) {
+			h.GoRoutines.Exec(ctx, "getServicesLogs", func(ctx context.Context) {
 				if err := h.getServicesLogs(); err != nil {
 					log.Error(ctx, "Hatchery> swarm> Cannot get service logs : %v", err)
 				}
 			})
 
-			sdk.GoRoutine(ctx, "killAwolWorker", func(ctx context.Context) {
+			h.GoRoutines.Exec(ctx, "killAwolWorker", func(ctx context.Context) {
 				_ = h.killAwolWorker(ctx)
 			})
 
-			sdk.GoRoutine(ctx, "refreshCDNConfiguration", func(ctx context.Context) {
+			h.GoRoutines.Exec(ctx, "refreshCDNConfiguration", func(ctx context.Context) {
 				if err := h.RefreshServiceLogger(ctx); err != nil {
 					log.Error(ctx, "Hatchery> swarm> Cannot get cdn configuration : %v", err)
 				}
@@ -705,7 +715,7 @@ func (h *HatcherySwarm) killAwolWorker(ctx context.Context) error {
 		// Delete the workers
 		for _, c := range oldContainers {
 			log.Debug("hatchery> swarm> killAwolWorker> Delete worker %s on %s", c.Names[0], dockerClient.name)
-			if err := h.killAndRemove(ctx, dockerClient, c.ID); err != nil {
+			if err := h.killAndRemove(ctx, dockerClient, c.ID, containers); err != nil {
 				log.Debug("hatchery> swarm> killAwolWorker> %v", err)
 			}
 		}
@@ -733,8 +743,37 @@ func (h *HatcherySwarm) killAwolWorker(ctx context.Context) error {
 				continue
 			}
 
+			// Send final logs before deleting service container
+			jobIdentifiers := h.GetIdentifiersFromLabels(c)
+			if jobIdentifiers == nil {
+				continue
+			}
+			endLog := log.Message{
+				Level: logrus.InfoLevel,
+				Value: string("End of Job"),
+				Signature: log.Signature{
+					Service: &log.SignatureService{
+						HatcheryID:      h.Service().ID,
+						HatcheryName:    h.ServiceName(),
+						RequirementID:   jobIdentifiers.ServiceID,
+						RequirementName: c.Labels[hatchery.LabelServiceReqName],
+						WorkerName:      c.Labels["service_worker"],
+					},
+					ProjectKey:   c.Labels[hatchery.LabelServiceProjectKey],
+					WorkflowName: c.Labels[hatchery.LabelServiceWorkflowName],
+					WorkflowID:   jobIdentifiers.WorkflowID,
+					RunID:        jobIdentifiers.RunID,
+					NodeRunName:  c.Labels[hatchery.LabelServiceNodeRunName],
+					JobName:      c.Labels[hatchery.LabelServiceJobName],
+					JobID:        jobIdentifiers.JobID,
+					NodeRunID:    jobIdentifiers.NodeRunID,
+					Timestamp:    time.Now().UnixNano(),
+				},
+			}
+			h.Common.SendServiceLog(ctx, []log.Message{endLog}, sdk.StatusTerminated)
+
 			log.Debug("hatchery> swarm> killAwolWorker> Delete worker (service) %s on %s", c.Names[0], dockerClient.name)
-			if err := h.killAndRemove(ctx, dockerClient, c.ID); err != nil {
+			if err := h.killAndRemove(ctx, dockerClient, c.ID, containers); err != nil {
 				log.Error(ctx, "hatchery> swarm> killAwolWorker> service %v on %s", err, dockerClient.name)
 			}
 			continue

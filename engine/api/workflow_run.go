@@ -13,15 +13,15 @@ import (
 
 	"github.com/go-gorp/gorp"
 	"github.com/gorilla/mux"
-	"github.com/sirupsen/logrus"
 
 	"github.com/ovh/cds/engine/api/ascode"
-	"github.com/ovh/cds/engine/api/cache"
+	"github.com/ovh/cds/engine/api/authentication"
 	"github.com/ovh/cds/engine/api/event"
 	"github.com/ovh/cds/engine/api/integration"
 	"github.com/ovh/cds/engine/api/objectstore"
 	"github.com/ovh/cds/engine/api/permission"
 	"github.com/ovh/cds/engine/api/project"
+	"github.com/ovh/cds/engine/api/services"
 	"github.com/ovh/cds/engine/api/workflow"
 	"github.com/ovh/cds/engine/service"
 	"github.com/ovh/cds/sdk"
@@ -34,7 +34,25 @@ const (
 	defaultLimit = 10
 )
 
-func (api *API) searchWorkflowRun(w http.ResponseWriter, r *http.Request, route, key, name string) error {
+func (api *API) getWorkflowsRunsAndNodesIDshandler() service.Handler {
+	return func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+		vars := mux.Vars(r)
+		key := vars["permProjectKey"]
+
+		p, err := project.Load(ctx, api.mustDB(), key, project.LoadOptions.WithWorkflowNames)
+		if err != nil {
+			return err
+		}
+
+		ids, err := workflow.LoadNodeRunIDs(api.mustDB(), p.WorkflowNames.IDs())
+		if err != nil {
+			return err
+		}
+		return service.WriteJSON(w, ids, http.StatusOK)
+	}
+}
+
+func (api *API) searchWorkflowRun(ctx context.Context, w http.ResponseWriter, r *http.Request, route, key, name string) error {
 	// About pagination: [FR] http://blog.octo.com/designer-une-api-rest/#pagination
 	var limit, offset int
 
@@ -71,7 +89,7 @@ func (api *API) searchWorkflowRun(w http.ResponseWriter, r *http.Request, route,
 
 	//Maximim range is set to 50
 	w.Header().Add("Accept-Range", "run 50")
-	runs, offset, limit, count, err := workflow.LoadRuns(api.mustDB(), key, name, offset, limit, mapFilters)
+	runs, offset, limit, count, err := workflow.LoadRunsSummaries(api.mustDB(), key, name, offset, limit, mapFilters)
 	if err != nil {
 		return sdk.WrapError(err, "Unable to load workflow runs")
 	}
@@ -129,13 +147,9 @@ func (api *API) searchWorkflowRun(w http.ResponseWriter, r *http.Request, route,
 
 	w.Header().Add("Content-Range", fmt.Sprintf("%d-%d/%d", offset, limit, count))
 
-	for i := range runs {
-		runs[i].Translate(r.Header.Get("Accept-Language"))
-	}
-
 	// Return empty array instead of nil
 	if runs == nil {
-		runs = []sdk.WorkflowRun{}
+		runs = []sdk.WorkflowRunSummary{}
 	}
 	return service.WriteJSON(w, runs, code)
 }
@@ -148,7 +162,7 @@ func (api *API) getWorkflowAllRunsHandler() service.Handler {
 		route := api.Router.GetRoute("GET", api.getWorkflowAllRunsHandler, map[string]string{
 			"permProjectKey": key,
 		})
-		return api.searchWorkflowRun(w, r, route, key, name)
+		return api.searchWorkflowRun(ctx, w, r, route, key, name)
 	}
 }
 
@@ -161,7 +175,7 @@ func (api *API) getWorkflowRunsHandler() service.Handler {
 			"key":          key,
 			"workflowName": name,
 		})
-		return api.searchWorkflowRun(w, r, route, key, name)
+		return api.searchWorkflowRun(ctx, w, r, route, key, name)
 	}
 }
 
@@ -336,8 +350,10 @@ func (api *API) deleteWorkflowRunHandler() service.Handler {
 		if err := workflow.MarkWorkflowRunsAsDelete(api.mustDB(), []int64{run.ID}); err != nil {
 			return sdk.WrapError(err, "cannot mark workflow run %d as delete", run.ID)
 		}
+		run.ToDelete = true
 
 		workflow.CountWorkflowRunsMarkToDelete(ctx, api.mustDB(), api.Metrics.WorkflowRunsMarkToDelete)
+		event.PublishWorkflowRun(ctx, *run, key)
 
 		return service.WriteJSON(w, nil, http.StatusAccepted)
 	}
@@ -365,12 +381,12 @@ func (api *API) stopWorkflowRunHandler() service.Handler {
 			return sdk.WrapError(err, "unable to load project")
 		}
 
-		report, err := stopWorkflowRun(ctx, api.mustDB, api.Cache, proj, run, getAPIConsumer(ctx), 0)
+		report, err := api.stopWorkflowRun(ctx, proj, run, 0)
 		if err != nil {
 			return sdk.WrapError(err, "unable to stop workflow")
 		}
 
-		go WorkflowSendEvent(context.Background(), api.mustDB(), api.Cache, *proj, report)
+		go api.WorkflowSendEvent(context.Background(), *proj, report)
 
 		go func(ID int64) {
 			wRun, err := workflow.LoadRunByID(api.mustDB(), ID, workflow.LoadRunOptions{DisableDetailledNodeRun: true})
@@ -402,18 +418,17 @@ func (api *API) stopWorkflowRunHandler() service.Handler {
 	}
 }
 
-func stopWorkflowRun(ctx context.Context, dbFunc func() *gorp.DbMap, store cache.Store, p *sdk.Project,
-	run *sdk.WorkflowRun, ident sdk.Identifiable, parentWorkflowRunID int64) (*workflow.ProcessorReport, error) {
+func (api *API) stopWorkflowRun(ctx context.Context, p *sdk.Project, run *sdk.WorkflowRun, parentWorkflowRunID int64) (*workflow.ProcessorReport, error) {
+	ident := getAPIConsumer(ctx)
 	report := new(workflow.ProcessorReport)
 
-	tx, err := dbFunc().Begin()
+	tx, err := api.mustDB().Begin()
 	if err != nil {
 		return nil, sdk.WrapError(err, "unable to create transaction")
 	}
 	defer tx.Rollback() //nolint
 
-	spwnMsg := sdk.SpawnMsg{ID: sdk.MsgWorkflowNodeStop.ID, Args: []interface{}{ident.GetUsername()}, Type: sdk.MsgWorkflowNodeStop.Type}
-
+	spwnMsg := sdk.SpawnMsgNew(*sdk.MsgWorkflowNodeStop, ident.GetUsername())
 	stopInfos := sdk.SpawnInfo{
 		APITime:     time.Now(),
 		RemoteTime:  time.Now(),
@@ -431,7 +446,7 @@ func stopWorkflowRun(ctx context.Context, dbFunc func() *gorp.DbMap, store cache
 				continue
 			}
 
-			r1, err := workflow.StopWorkflowNodeRun(ctx, dbFunc, store, *p, *run, wnr, stopInfos)
+			r1, err := workflow.StopWorkflowNodeRun(ctx, api.mustDB, api.Cache, *p, *run, wnr, stopInfos)
 			if err != nil {
 				return nil, sdk.WrapError(err, "unable to stop workflow node run %d", wnr.ID)
 			}
@@ -445,7 +460,7 @@ func stopWorkflowRun(ctx context.Context, dbFunc func() *gorp.DbMap, store cache
 				}
 				model, has := run.Workflow.OutGoingHookModels[wnr.OutgoingHook.HookModelID]
 				if !has {
-					m, errM := workflow.LoadOutgoingHookModelByID(dbFunc(), wnr.OutgoingHook.HookModelID)
+					m, errM := workflow.LoadOutgoingHookModelByID(api.mustDB(), wnr.OutgoingHook.HookModelID)
 					if errM != nil {
 						log.Error(ctx, "stopWorkflowRun> Unable to load outgoing hook model: %v", errM)
 						continue
@@ -458,19 +473,19 @@ func stopWorkflowRun(ctx context.Context, dbFunc func() *gorp.DbMap, store cache
 					targetProject := wnr.OutgoingHook.Config[sdk.HookConfigTargetProject].Value
 					targetWorkflow := wnr.OutgoingHook.Config[sdk.HookConfigTargetWorkflow].Value
 
-					targetRun, errL := workflow.LoadRun(ctx, dbFunc(), targetProject, targetWorkflow, *wnr.Callback.WorkflowRunNumber, workflow.LoadRunOptions{})
+					targetRun, errL := workflow.LoadRun(ctx, api.mustDB(), targetProject, targetWorkflow, *wnr.Callback.WorkflowRunNumber, workflow.LoadRunOptions{})
 					if errL != nil {
 						log.Error(ctx, "stopWorkflowRun> Unable to load last workflow run: %v", errL)
 						continue
 					}
 
-					targetProj, errP := project.Load(ctx, dbFunc(), targetProject)
+					targetProj, errP := project.Load(ctx, api.mustDB(), targetProject)
 					if errP != nil {
 						log.Error(ctx, "stopWorkflowRun> Unable to load project %v", errP)
 						continue
 					}
 
-					r2, err := stopWorkflowRun(ctx, dbFunc, store, targetProj, targetRun, ident, run.ID)
+					r2, err := api.stopWorkflowRun(ctx, targetProj, targetRun, run.ID)
 					if err != nil {
 						log.Error(ctx, "stopWorkflowRun> Unable to stop workflow %v", err)
 						continue
@@ -493,23 +508,23 @@ func stopWorkflowRun(ctx context.Context, dbFunc func() *gorp.DbMap, store cache
 	}
 
 	if parentWorkflowRunID == 0 {
-		report, err := updateParentWorkflowRun(ctx, dbFunc, store, run)
+		report, err := api.updateParentWorkflowRun(ctx, run)
 		if err != nil {
 			return nil, sdk.WithStack(err)
 		}
-		go WorkflowSendEvent(context.Background(), dbFunc(), store, *p, report)
+		go api.WorkflowSendEvent(context.Background(), *p, report)
 	}
 
 	return report, nil
 }
 
-func updateParentWorkflowRun(ctx context.Context, dbFunc func() *gorp.DbMap, store cache.Store, run *sdk.WorkflowRun) (*workflow.ProcessorReport, error) {
+func (api *API) updateParentWorkflowRun(ctx context.Context, run *sdk.WorkflowRun) (*workflow.ProcessorReport, error) {
 	if !run.HasParentWorkflow() {
 		return nil, nil
 	}
 
 	parentProj, err := project.Load(context.Background(),
-		dbFunc(), run.RootRun().HookEvent.ParentWorkflow.Key,
+		api.mustDB(), run.RootRun().HookEvent.ParentWorkflow.Key,
 		project.LoadOptions.WithVariables,
 		project.LoadOptions.WithIntegrations,
 		project.LoadOptions.WithApplicationVariables,
@@ -520,7 +535,7 @@ func updateParentWorkflowRun(ctx context.Context, dbFunc func() *gorp.DbMap, sto
 	}
 
 	parentWR, err := workflow.LoadRun(ctx,
-		dbFunc(),
+		api.mustDB(),
 		run.RootRun().HookEvent.ParentWorkflow.Key,
 		run.RootRun().HookEvent.ParentWorkflow.Name,
 		run.RootRun().HookEvent.ParentWorkflow.Run,
@@ -531,11 +546,11 @@ func updateParentWorkflowRun(ctx context.Context, dbFunc func() *gorp.DbMap, sto
 		return nil, sdk.WrapError(err, "unable to load parent run: %v", run.RootRun().HookEvent)
 	}
 
-	report, err := workflow.UpdateParentWorkflowRun(ctx, dbFunc, store, run, *parentProj, parentWR)
+	report, err := workflow.UpdateParentWorkflowRun(ctx, api.mustDB, api.Cache, run, *parentProj, parentWR)
 	if err != nil {
 		return nil, sdk.WithStack(err)
 	}
-	go WorkflowSendEvent(context.Background(), dbFunc(), store, *parentProj, report)
+	go api.WorkflowSendEvent(context.Background(), *parentProj, report)
 
 	return report, nil
 }
@@ -654,7 +669,7 @@ func (api *API) getWorkflowCommitsHandler() service.Handler {
 		defer tx.Rollback() // nolint
 
 		log.Debug("getWorkflowCommitsHandler> VCSHash: %s VCSBranch: %s", wfNodeRun.VCSHash, wfNodeRun.VCSBranch)
-		commits, _, err := workflow.GetNodeRunBuildCommits(ctx, tx, api.Cache, *proj, wf, nodeName, number, wfNodeRun, &app, &env)
+		commits, _, err := workflow.GetNodeRunBuildCommits(ctx, tx, api.Cache, *proj, *wf, nodeName, number, wfNodeRun, &app, &env)
 		if err != nil {
 			return sdk.WrapError(err, "unable to load commits")
 		}
@@ -693,7 +708,7 @@ func (api *API) stopWorkflowNodeRunHandler() service.Handler {
 			return sdk.WrapError(err, "unable to load workflow run with number %d for workflow %s", workflowRunNumber, workflowName)
 		}
 
-		workflowNodeRun, err := workflow.LoadNodeRun(api.mustDB(), key, workflowName, workflowRun.Number, workflowNodeRunID, workflow.LoadRunOptions{
+		workflowNodeRun, err := workflow.LoadNodeRun(api.mustDB(), key, workflowName, workflowNodeRunID, workflow.LoadRunOptions{
 			WithDeleted: true,
 		})
 		if err != nil {
@@ -711,8 +726,8 @@ func (api *API) stopWorkflowNodeRunHandler() service.Handler {
 			return sdk.WrapError(err, "unable to stop workflow node run")
 		}
 
-		sdk.GoRoutine(context.Background(), fmt.Sprintf("stopWorkflowNodeRunHandler-%d", workflowNodeRunID), func(ctx context.Context) {
-			WorkflowSendEvent(context.Background(), api.mustDB(), api.Cache, *p, r1)
+		api.GoRoutines.Exec(context.Background(), fmt.Sprintf("stopWorkflowNodeRunHandler-%d", workflowNodeRunID), func(ctx context.Context) {
+			api.WorkflowSendEvent(context.Background(), *p, r1)
 		})
 
 		tx, err := api.mustDB().Begin()
@@ -745,8 +760,8 @@ func (api *API) stopWorkflowNodeRunHandler() service.Handler {
 			return sdk.WithStack(err)
 		}
 
-		sdk.GoRoutine(context.Background(), fmt.Sprintf("stopWorkflowNodeRunHandler-%d-resync-run-%d", workflowNodeRunID, workflowRun.ID), func(ctx context.Context) {
-			WorkflowSendEvent(context.Background(), api.mustDB(), api.Cache, *p, r2)
+		api.GoRoutines.Exec(context.Background(), fmt.Sprintf("stopWorkflowNodeRunHandler-%d-resync-run-%d", workflowNodeRunID, workflowRun.ID), func(ctx context.Context) {
+			api.WorkflowSendEvent(context.Background(), *p, r2)
 		})
 
 		go func(ID int64) {
@@ -773,15 +788,11 @@ func (api *API) getWorkflowNodeRunHandler() service.Handler {
 		vars := mux.Vars(r)
 		key := vars["key"]
 		name := vars["permWorkflowName"]
-		number, err := requestVarInt(r, "number")
-		if err != nil {
-			return err
-		}
 		id, err := requestVarInt(r, "nodeRunID")
 		if err != nil {
 			return err
 		}
-		run, err := workflow.LoadNodeRun(api.mustDB(), key, name, number, id, workflow.LoadRunOptions{
+		run, err := workflow.LoadNodeRun(api.mustDB(), key, name, id, workflow.LoadRunOptions{
 			WithTests:           true,
 			WithArtifacts:       true,
 			WithStaticFiles:     true,
@@ -803,6 +814,8 @@ func (api *API) postWorkflowRunHandler() service.Handler {
 		key := vars["key"]
 		name := vars["permWorkflowName"]
 
+		consumer := getAPIConsumer(ctx)
+
 		telemetry.Current(ctx,
 			telemetry.Tag(telemetry.TagProjectKey, key),
 			telemetry.Tag(telemetry.TagWorkflow, name),
@@ -820,11 +833,11 @@ func (api *API) postWorkflowRunHandler() service.Handler {
 			return sdk.WrapError(errP, "cannot load project")
 		}
 
-		// GET BODY
-		opts := &sdk.WorkflowRunPostHandlerOption{}
-		if err := service.UnmarshalBody(r, opts); err != nil {
+		opts := sdk.WorkflowRunPostHandlerOption{}
+		if err := service.UnmarshalBody(r, &opts); err != nil {
 			return err
 		}
+		opts.AuthConsumerID = getAPIConsumer(ctx).ID
 
 		// Request check
 		if opts.Manual != nil && opts.Manual.OnlyFailedJobs && opts.Manual.Resync {
@@ -841,31 +854,30 @@ func (api *API) postWorkflowRunHandler() service.Handler {
 			}
 		}
 
-		c := getAPIConsumer(ctx)
 		// To handle conditions on hooks
 		if opts.Hook != nil {
-			hook, errH := workflow.LoadHookByUUID(api.mustDB(), opts.Hook.WorkflowNodeHookUUID)
-			if errH != nil {
-				return sdk.WrapError(errH, "cannot load hook for uuid %s", opts.Hook.WorkflowNodeHookUUID)
+			hook, err := workflow.LoadHookByUUID(api.mustDB(), opts.Hook.WorkflowNodeHookUUID)
+			if err != nil {
+				return sdk.WrapError(err, "cannot load hook for uuid %s", opts.Hook.WorkflowNodeHookUUID)
 			}
 			conditions := hook.Conditions
 			params := sdk.ParametersFromMap(opts.Hook.Payload)
 
-			var errc error
 			var conditionsOK bool
+			var conditionsError error
 			if conditions.LuaScript == "" {
-				conditionsOK, errc = sdk.WorkflowCheckConditions(conditions.PlainConditions, params)
+				conditionsOK, conditionsError = sdk.WorkflowCheckConditions(conditions.PlainConditions, params)
 			} else {
 				luacheck, err := luascript.NewCheck()
 				if err != nil {
 					return sdk.WrapError(err, "cannot check lua script")
 				}
 				luacheck.SetVariables(sdk.ParametersToMap(params))
-				errc = luacheck.Perform(conditions.LuaScript)
+				conditionsError = luacheck.Perform(conditions.LuaScript)
 				conditionsOK = luacheck.Result
 			}
-			if errc != nil {
-				return sdk.WrapError(errc, "cannot check conditions")
+			if conditionsError != nil {
+				return sdk.NewError(sdk.ErrWrongRequest, fmt.Errorf("cannot check conditions: %v", conditionsError))
 			}
 
 			if !conditionsOK {
@@ -880,7 +892,7 @@ func (api *API) postWorkflowRunHandler() service.Handler {
 				return sdk.NewErrorFrom(sdk.ErrForbidden, "this workflow execution is on read only mode, it cannot be run anymore")
 			}
 
-			if opts != nil && opts.Manual != nil && opts.Manual.Resync {
+			if opts.Manual != nil && opts.Manual.Resync {
 				log.Debug("Resync workflow %d for run %d", lastRun.Workflow.ID, lastRun.ID)
 				if err := workflow.Resync(ctx, api.mustDB(), api.Cache, *p, lastRun); err != nil {
 					return err
@@ -899,50 +911,74 @@ func (api *API) postWorkflowRunHandler() service.Handler {
 					return sdk.WrapError(sdk.ErrWorkflowNodeNotFound, "unable to find node %d", id)
 				}
 
-				if !permission.AccessToWorkflowNode(ctx, api.mustDB(), &lastRun.Workflow, fromNode, getAPIConsumer(ctx), sdk.PermissionReadExecute) {
+				if !permission.AccessToWorkflowNode(ctx, api.mustDB(), &lastRun.Workflow, fromNode, *consumer, sdk.PermissionReadExecute) {
 					return sdk.WrapError(sdk.ErrNoPermExecution, "not enough right on node %s", fromNode.Name)
 				}
 			}
 
 			lastRun.Status = sdk.StatusWaiting
+			// Workflow Run initialization
+			api.GoRoutines.Exec(context.Background(), fmt.Sprintf("api.initWorkflowRun-%d", lastRun.ID), func(ctx context.Context) {
+				api.initWorkflowRun(ctx, p.Key, wf, lastRun, opts)
+			}, api.PanicDump())
+
 		} else {
-			var errWf error
-			wf, errWf = workflow.Load(ctx, api.mustDB(), api.Cache, *p, name, workflow.LoadOptions{
+			var err error
+			wf, err = workflow.Load(ctx, api.mustDB(), api.Cache, *p, name, workflow.LoadOptions{
 				DeepPipeline:          true,
 				WithAsCodeUpdateEvent: true,
 				WithIcon:              true,
 				WithIntegrations:      true,
 				WithTemplate:          true,
 			})
-			if errWf != nil {
-				return sdk.WrapError(errWf, "unable to load workflow %s", name)
+			if err != nil {
+				return sdk.WrapError(err, "unable to load workflow %s", name)
 			}
 
 			// Check node permission
-			if isService := isService(ctx); !isService && !permission.AccessToWorkflowNode(ctx, api.mustDB(), wf, &wf.WorkflowData.Node, getAPIConsumer(ctx), sdk.PermissionReadExecute) {
+			if isService := isService(ctx); !isService && !permission.AccessToWorkflowNode(ctx, api.mustDB(), wf, &wf.WorkflowData.Node, *consumer, sdk.PermissionReadExecute) {
 				return sdk.WrapError(sdk.ErrNoPermExecution, "not enough right on node %s", wf.WorkflowData.Node.Name)
 			}
 
 			// CREATE WORKFLOW RUN
 			var errCreateRun error
-			lastRun, errCreateRun = workflow.CreateRun(api.mustDB(), wf, opts, c)
+			lastRun, errCreateRun = workflow.CreateRun(api.mustDB(), wf, opts)
 			if errCreateRun != nil {
 				return errCreateRun
 			}
 		}
 
-		// Workflow Run initialization
-		sdk.GoRoutine(context.Background(), fmt.Sprintf("api.initWorkflowRun-%d", lastRun.ID), func(ctx context.Context) {
-			api.initWorkflowRun(ctx, p.Key, wf, lastRun, opts, c)
-		}, api.PanicDump())
-
 		return service.WriteJSON(w, lastRun, http.StatusAccepted)
 	}
 }
 
-func (api *API) initWorkflowRun(ctx context.Context, projKey string, wf *sdk.Workflow, wfRun *sdk.WorkflowRun, opts *sdk.WorkflowRunPostHandlerOption, u *sdk.AuthConsumer) {
+func (api *API) initWorkflowRun(ctx context.Context, projKey string, wf *sdk.Workflow, wfRun *sdk.WorkflowRun, opts sdk.WorkflowRunPostHandlerOption) {
+	ctx, end := telemetry.Span(ctx, "api.initWorkflowRun",
+		telemetry.Tag(telemetry.TagProjectKey, projKey),
+		telemetry.Tag(telemetry.TagWorkflow, wf.Name),
+	)
+	defer end()
+
 	var asCodeInfosMsg []sdk.Message
-	report := new(workflow.ProcessorReport)
+	var report = new(workflow.ProcessorReport)
+
+	c, err := authentication.LoadConsumerByID(ctx, api.mustDB(), opts.AuthConsumerID,
+		authentication.LoadConsumerOptions.WithAuthentifiedUserWithContacts,
+		authentication.LoadConsumerOptions.WithConsumerGroups)
+	if err != nil {
+		r := failInitWorkflowRun(ctx, api.mustDB(), wfRun, err)
+		report.Merge(ctx, r)
+		return
+	}
+
+	// Add service for consumer if exists
+	s, err := services.LoadByConsumerID(context.Background(), api.mustDB(), c.ID)
+	if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+		r := failInitWorkflowRun(ctx, api.mustDB(), wfRun, err)
+		report.Merge(ctx, r)
+		return
+	}
+	c.Service = s
 
 	p, err := project.Load(ctx, api.mustDB(), projKey,
 		project.LoadOptions.WithVariables,
@@ -956,14 +992,14 @@ func (api *API) initWorkflowRun(ctx context.Context, projKey string, wf *sdk.Wor
 	}
 
 	defer func() {
-		go WorkflowSendEvent(context.Background(), api.mustDB(), api.Cache, *p, report)
+		go api.WorkflowSendEvent(context.Background(), *p, report)
 	}()
 
 	var workflowSecrets *workflow.PushSecrets
 	if wfRun.Status == sdk.StatusPending {
 		// Sync as code event to remove events in case where a PR was merged
 		if len(wf.AsCodeEvent) > 0 {
-			res, err := ascode.SyncEvents(ctx, api.mustDB(), api.Cache, *p, *wf, u.AuthentifiedUser)
+			res, err := ascode.SyncEvents(ctx, api.mustDB(), api.Cache, *p, *wf, c)
 			if err != nil {
 				r := failInitWorkflowRun(ctx, api.mustDB(), wfRun, sdk.WrapError(err, "unable to sync as code event"))
 				report.Merge(ctx, r)
@@ -976,7 +1012,7 @@ func (api *API) initWorkflowRun(ctx context.Context, projKey string, wf *sdk.Wor
 					return
 				}
 				wf.FromRepository = res.FromRepository
-				event.PublishWorkflowUpdate(ctx, p.Key, *wf, *wf, u)
+				event.PublishWorkflowUpdate(ctx, p.Key, *wf, *wf, c)
 			}
 		}
 
@@ -1008,14 +1044,10 @@ func (api *API) initWorkflowRun(ctx context.Context, projKey string, wf *sdk.Wor
 			log.Debug("workflow.CreateFromRepository> %s", wf.Name)
 			oldWf := *wf
 			var asCodeInfosMsg []sdk.Message
-			workflowSecrets, asCodeInfosMsg, err = workflow.CreateFromRepository(ctx, api.mustDB(), api.Cache, p1, wf, *opts, *u, project.DecryptWithBuiltinKey)
+			workflowSecrets, asCodeInfosMsg, err = workflow.CreateFromRepository(ctx, api.mustDB(), api.Cache, p1, wf, opts, *c, project.DecryptWithBuiltinKey)
 			infos := make([]sdk.SpawnMsg, len(asCodeInfosMsg))
 			for i, msg := range asCodeInfosMsg {
-				infos[i] = sdk.SpawnMsg{
-					ID:   msg.ID,
-					Args: msg.Args,
-					Type: msg.Type,
-				}
+				infos[i] = msg.ToSpawnMsg()
 			}
 			workflow.AddWorkflowRunInfo(wfRun, infos...)
 			if err != nil {
@@ -1024,7 +1056,7 @@ func (api *API) initWorkflowRun(ctx context.Context, projKey string, wf *sdk.Wor
 				return
 			}
 
-			event.PublishWorkflowUpdate(ctx, p.Key, *wf, oldWf, u)
+			event.PublishWorkflowUpdate(ctx, p.Key, *wf, oldWf, c)
 		} else {
 			// Get all secrets for non ascode run
 			workflowSecrets, err = workflow.RetrieveSecrets(ctx, api.mustDB(), *wf)
@@ -1051,7 +1083,7 @@ func (api *API) initWorkflowRun(ctx context.Context, projKey string, wf *sdk.Wor
 		return
 	}
 
-	r, err := workflow.StartWorkflowRun(ctx, tx, api.Cache, *p, wfRun, opts, u, asCodeInfosMsg)
+	r, err := workflow.StartWorkflowRun(ctx, tx, api.Cache, *p, wfRun, &opts, *c, asCodeInfosMsg)
 	report.Merge(ctx, r)
 	if err != nil {
 		_ = tx.Rollback()
@@ -1068,8 +1100,7 @@ func (api *API) initWorkflowRun(ctx context.Context, projKey string, wf *sdk.Wor
 	workflow.ResyncNodeRunsWithCommits(ctx, api.mustDB(), api.Cache, *p, report)
 
 	// Purge workflow run
-	sdk.GoRoutine(ctx, "workflow.PurgeWorkflowRun", func(ctx context.Context) {
-
+	api.GoRoutines.Exec(ctx, "workflow.PurgeWorkflowRun", func(ctx context.Context) {
 		tx, err := api.mustDB().Begin()
 		defer tx.Rollback() // nolint
 		if err != nil {
@@ -1084,19 +1115,17 @@ func (api *API) initWorkflowRun(ctx context.Context, projKey string, wf *sdk.Wor
 			log.Error(ctx, "workflow.PurgeWorkflowRun> unable to commit transaction:  %v", err)
 			return
 		}
-
 		workflow.CountWorkflowRunsMarkToDelete(ctx, api.mustDB(), api.Metrics.WorkflowRunsMarkToDelete)
-
 	}, api.PanicDump())
 
 	// Update parent
 	for i := range report.WorkflowRuns() {
 		run := &report.WorkflowRuns()[i]
-		reportParent, err := updateParentWorkflowRun(ctx, api.mustDB, api.Cache, run)
+		reportParent, err := api.updateParentWorkflowRun(ctx, run)
 		if err != nil {
 			log.Error(ctx, "unable to update parent workflow run: %v", err)
 		}
-		go WorkflowSendEvent(context.Background(), api.mustDB(), api.Cache, *p, reportParent)
+		go api.WorkflowSendEvent(context.Background(), *p, reportParent)
 	}
 }
 
@@ -1235,27 +1264,20 @@ func failInitWorkflowRun(ctx context.Context, db *gorp.DbMap, wfRun *sdk.Workflo
 
 	var info sdk.SpawnMsg
 	if sdk.ErrorIs(err, sdk.ErrConditionsNotOk) {
-		info = sdk.SpawnMsg{
-			ID:   sdk.MsgWorkflowConditionError.ID,
-			Type: sdk.MsgWorkflowConditionError.Type,
-		}
+		info = sdk.SpawnMsgNew(*sdk.MsgWorkflowConditionError)
 		if len(wfRun.WorkflowNodeRuns) == 0 {
 			wfRun.Status = sdk.StatusNeverBuilt
 		}
 	} else {
 		httpErr := sdk.ExtractHTTPError(err, "")
 		isErrWithStack := sdk.IsErrorWithStack(err)
-		fields := logrus.Fields{}
+		fields := log.Fields{}
 		if isErrWithStack {
 			fields["stack_trace"] = fmt.Sprintf("%+v", err)
 		}
-		log.ErrorWithFields(ctx, fields, "%s", err)
+		log.ErrorWithFields(ctx, fields, "failInitWorkflowRun error: %v", err)
 		wfRun.Status = sdk.StatusFail
-		info = sdk.SpawnMsg{
-			ID:   sdk.MsgWorkflowError.ID,
-			Args: []interface{}{httpErr.Error()},
-			Type: sdk.MsgWorkflowError.Type,
-		}
+		info = sdk.SpawnMsgNew(*sdk.MsgWorkflowError, httpErr)
 	}
 
 	workflow.AddWorkflowRunInfo(wfRun, info)
@@ -1433,13 +1455,12 @@ func (api *API) getWorkflowRunArtifactsHandler() service.Handler {
 
 func (api *API) getWorkflowNodeRunJobSpawnInfosHandler() service.Handler {
 	return func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
-		runJobID, errJ := requestVarInt(r, "runJobId")
-		if errJ != nil {
-			return sdk.WrapError(errJ, "getWorkflowNodeRunJobSpawnInfosHandler> runJobId: invalid number")
+		runJobID, err := requestVarInt(r, "runJobID")
+		if err != nil {
+			return sdk.WrapError(err, "invalid number run job id")
 		}
-		db := api.mustDB()
 
-		spawnInfos, err := workflow.LoadNodeRunJobInfo(ctx, db, runJobID)
+		spawnInfos, err := workflow.LoadNodeRunJobInfo(ctx, api.mustDB(), runJobID)
 		if err != nil {
 			return sdk.WrapError(err, "cannot load spawn infos for node run job id %d", runJobID)
 		}
@@ -1455,93 +1476,6 @@ func (api *API) getWorkflowNodeRunJobSpawnInfosHandler() service.Handler {
 	}
 }
 
-func (api *API) getWorkflowNodeRunJobServiceLogsHandler() service.Handler {
-	return func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
-		runJobID, errJ := requestVarInt(r, "runJobId")
-		if errJ != nil {
-			return sdk.WrapError(errJ, "runJobId: invalid number")
-		}
-		db := api.mustDB()
-
-		logsServices, err := workflow.LoadServicesLogsByJob(db, runJobID)
-		if err != nil {
-			return sdk.WrapError(err, "cannot load service logs for node run job id %d", runJobID)
-		}
-
-		return service.WriteJSON(w, logsServices, http.StatusOK)
-	}
-}
-
-func (api *API) getWorkflowNodeRunJobStepHandler() service.Handler {
-	return func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
-		vars := mux.Vars(r)
-		projectKey := vars["key"]
-		workflowName := vars["permWorkflowName"]
-		number, errN := requestVarInt(r, "number")
-		if errN != nil {
-			return sdk.WrapError(errN, "number: invalid number")
-		}
-		nodeRunID, errNI := requestVarInt(r, "nodeRunID")
-		if errNI != nil {
-			return sdk.WrapError(errNI, "id: invalid number")
-		}
-		runJobID, errJ := requestVarInt(r, "runJobId")
-		if errJ != nil {
-			return sdk.WrapError(errJ, "runJobId: invalid number")
-		}
-		stepOrder, errS := requestVarInt(r, "stepOrder")
-		if errS != nil {
-			return sdk.WrapError(errS, "stepOrder: invalid number")
-		}
-
-		// Check nodeRunID is link to workflow
-		nodeRun, errNR := workflow.LoadNodeRun(api.mustDB(), projectKey, workflowName, number, nodeRunID, workflow.LoadRunOptions{DisableDetailledNodeRun: true})
-		if errNR != nil {
-			return sdk.WrapError(errNR, "cannot find nodeRun %d/%d for workflow %s in project %s", nodeRunID, number, workflowName, projectKey)
-		}
-
-		var stepStatus string
-		// Find job/step in nodeRun
-	stageLoop:
-		for _, s := range nodeRun.Stages {
-			for _, rj := range s.RunJobs {
-				if rj.ID != runJobID {
-					continue
-				}
-				ss := rj.Job.StepStatus
-				for _, sss := range ss {
-					if int64(sss.StepOrder) == stepOrder {
-						stepStatus = sss.Status
-						break
-					}
-				}
-				break stageLoop
-			}
-		}
-
-		if stepStatus == "" {
-			return sdk.WrapError(sdk.ErrStepNotFound, "cannot find step %d on job %d in nodeRun %d/%d for workflow %s in project %s",
-				stepOrder, runJobID, nodeRunID, number, workflowName, projectKey)
-		}
-
-		logs, errL := workflow.LoadStepLogs(api.mustDB(), runJobID, stepOrder)
-		if errL != nil {
-			return sdk.WrapError(errL, "cannot load log for runJob %d on step %d", runJobID, stepOrder)
-		}
-
-		ls := &sdk.Log{}
-		if logs != nil {
-			ls = logs
-		}
-		result := &sdk.BuildState{
-			Status:   stepStatus,
-			StepLogs: *ls,
-		}
-
-		return service.WriteJSON(w, result, http.StatusOK)
-	}
-}
-
 func (api *API) getWorkflowRunTagsHandler() service.Handler {
 	return func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 		vars := mux.Vars(r)
@@ -1550,7 +1484,7 @@ func (api *API) getWorkflowRunTagsHandler() service.Handler {
 
 		res, err := workflow.GetTagsAndValue(api.mustDB(), projectKey, workflowName)
 		if err != nil {
-			return sdk.WrapError(err, "Error")
+			return err
 		}
 
 		return service.WriteJSON(w, res, http.StatusOK)

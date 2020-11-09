@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/ovh/cds/engine/api/cache"
 	"github.com/ovh/cds/engine/api/permission"
+	"github.com/ovh/cds/engine/cache"
 	"github.com/ovh/cds/engine/gorpmapper"
 	"github.com/ovh/cds/sdk"
 	"github.com/ovh/cds/sdk/telemetry"
@@ -53,12 +53,12 @@ func runFromHook(ctx context.Context, db gorpmapper.SqlExecutorWithTx, store cac
 	//Else if will trigger a new subnumber of the last workflow run
 	if h.NodeID == wr.Workflow.WorkflowData.Node.ID {
 		if err := CompleteWorkflow(ctx, db, &wr.Workflow, proj, LoadOptions{DeepPipeline: true}); err != nil {
-			return nil, sdk.WrapError(err, "Unable to valid workflow")
+			return nil, sdk.WrapError(err, "Unable to complete workflow")
 		}
 
 		// Add add code spawn info
 		for _, msg := range asCodeMsg {
-			AddWorkflowRunInfo(wr, sdk.SpawnMsg{ID: msg.ID, Args: msg.Args, Type: msg.Type})
+			AddWorkflowRunInfo(wr, msg.ToSpawnMsg())
 		}
 
 		//Process it
@@ -93,14 +93,14 @@ func manualRunFromNode(ctx context.Context, db gorpmapper.SqlExecutorWithTx, sto
 }
 
 func StartWorkflowRun(ctx context.Context, db gorpmapper.SqlExecutorWithTx, store cache.Store, proj sdk.Project, wr *sdk.WorkflowRun,
-	opts *sdk.WorkflowRunPostHandlerOption, u *sdk.AuthConsumer, asCodeInfos []sdk.Message) (*ProcessorReport, error) {
+	opts *sdk.WorkflowRunPostHandlerOption, u sdk.AuthConsumer, asCodeInfos []sdk.Message) (*ProcessorReport, error) {
 	ctx, end := telemetry.Span(ctx, "api.startWorkflowRun")
 	defer end()
 
 	report := new(ProcessorReport)
 
 	for _, msg := range asCodeInfos {
-		AddWorkflowRunInfo(wr, sdk.SpawnMsg{ID: msg.ID, Args: msg.Args, Type: msg.Type})
+		AddWorkflowRunInfo(wr, msg.ToSpawnMsg())
 	}
 
 	wr.Status = sdk.StatusWaiting

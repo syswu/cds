@@ -23,6 +23,7 @@ workflow:
     pipeline: deploy
     application: my-application
     environment: my-production
+    one_at_a_time: true
 hooks:
   build:
   - type: RepositoryWebHook
@@ -34,6 +35,7 @@ notifications:
     on_success: never
     recipients:
     - me@foo.bar
+retention_policy: return run_days_before < 7
 ```
 
 There are two major things to understand: `workflow` and `hooks`. A workflow is a kind of graph starting from a root pipeline, and other pipelines with dependencies. In this example, the `deploy` pipeline will be triggered after the `build` pipeline.
@@ -126,3 +128,23 @@ Example of vcs notification. Note that `pipelines` list is optional on every not
       disable_comment: false
       disable_status: false
 ```
+
+## Mutex
+
+[Mutex documentation]({{<relref "/docs/concepts/workflow/mutex.md">}})
+
+Example of a pipeline limited to one execution at a time: deployments to production cannot be executed concurently.
+
+```yml
+name: my-workflow
+workflow:
+  # ...
+  deploy:
+    pipeline: deploy
+    # ...
+    one_at_a_time: true # No concurent deployments
+```
+
+## Retention Policy
+
+[Retention documentation]({{<relref "/docs/concepts/workflow/retention.md">}})

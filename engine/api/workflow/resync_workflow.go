@@ -5,7 +5,7 @@ import (
 
 	"github.com/go-gorp/gorp"
 
-	"github.com/ovh/cds/engine/api/cache"
+	"github.com/ovh/cds/engine/cache"
 	"github.com/ovh/cds/sdk"
 	"github.com/ovh/cds/sdk/log"
 )
@@ -127,7 +127,7 @@ func ResyncNodeRunsWithCommits(ctx context.Context, db *gorp.DbMap, store cache.
 			}
 
 			//New context because we are in goroutine
-			commits, curVCSInfos, err := GetNodeRunBuildCommits(context.TODO(), tx, store, proj, &wr.Workflow, nodeName, wr.Number, &nr, &app, env)
+			commits, curVCSInfos, err := GetNodeRunBuildCommits(context.TODO(), tx, store, proj, wr.Workflow, nodeName, wr.Number, &nr, &app, env)
 			if err != nil {
 				log.Error(ctx, "ResyncNodeRuns> cannot get build commits on a node run %v", err)
 			} else if commits != nil {

@@ -1,17 +1,18 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"gopkg.in/spacemonkeygo/httpsig.v0"
 
 	"github.com/ovh/cds/sdk"
@@ -44,18 +45,15 @@ type RouterConfig struct {
 
 // HandlerConfig is the configuration for one handler
 type HandlerConfig struct {
-	Name             string
-	Method           string
-	Handler          Handler
-	IsDeprecated     bool
-	NeedAuth         bool
-	NeedAdmin        bool
-	MaintenanceAware bool
-	AllowProvider    bool
-	AllowedTokens    []string
-	AllowedScopes    []sdk.AuthConsumerScope
-	PermissionLevel  int
-	CleanURL         string
+	Name                   string
+	Method                 string
+	Handler                Handler
+	IsDeprecated           bool
+	OverrideAuthMiddleware Middleware
+	MaintenanceAware       bool
+	AllowedScopes          []sdk.AuthConsumerScope
+	PermissionLevel        int
+	CleanURL               string
 }
 
 // Accepted is a helper function used by asynchronous handlers
@@ -69,14 +67,20 @@ func Accepted(w http.ResponseWriter) error {
 }
 
 // Write is a helper function
-func Write(w http.ResponseWriter, btes []byte, status int, contentType string) error {
+func Write(w http.ResponseWriter, r io.Reader, status int, contentType string) error {
 	w.Header().Add("Content-Type", contentType)
-	w.Header().Add("Content-Length", fmt.Sprintf("%d", len(btes)))
 
 	WriteProcessTime(context.TODO(), w)
 	w.WriteHeader(status)
-	_, err := w.Write(btes)
-	return sdk.WithStack(err)
+
+	n, err := io.Copy(w, r)
+	if err != nil {
+		return sdk.WithStack(err)
+	}
+
+	w.Header().Add("Content-Length", fmt.Sprintf("%d", n))
+
+	return nil
 }
 
 // WriteJSON is a helper function to marshal json, handle errors and set Content-Type for the best
@@ -85,7 +89,7 @@ func WriteJSON(w http.ResponseWriter, data interface{}, status int) error {
 	if err != nil {
 		return sdk.WrapError(err, "Unable to marshal json data")
 	}
-	return sdk.WithStack(Write(w, b, status, "application/json"))
+	return sdk.WithStack(Write(w, bytes.NewReader(b), status, "application/json"))
 }
 
 // WriteProcessTime writes the duration of the call in the responsewriter
@@ -110,7 +114,7 @@ func WriteError(ctx context.Context, w http.ResponseWriter, r *http.Request, err
 	httpErr := sdk.ExtractHTTPError(err, al)
 	isErrWithStack := sdk.IsErrorWithStack(err)
 
-	fields := logrus.Fields{}
+	fields := log.Fields{}
 	if isErrWithStack {
 		fields["stack_trace"] = fmt.Sprintf("%+v", err)
 	}
@@ -179,16 +183,43 @@ func CheckRequestSignatureMiddleware(pubKey *rsa.PublicKey) Middleware {
 	verifier.SetRequiredHeaders([]string{"(request-target)", "host", "date"})
 
 	return func(ctx context.Context, w http.ResponseWriter, req *http.Request, rc *HandlerConfig) (context.Context, error) {
-		if !rc.NeedAuth {
-			return ctx, nil
-		}
-
 		if err := verifier.Verify(req); err != nil {
 			return ctx, sdk.NewError(sdk.ErrUnauthorized, err)
 		}
 
 		log.Debug("Request has been successfully verified")
-
 		return ctx, nil
+	}
+}
+
+// FormInt64 return a int64.
+func FormInt64(r *http.Request, s string) int64 {
+	i, _ := strconv.ParseInt(r.FormValue(s), 10, 64)
+	return i
+}
+
+// FormInt return a int.
+func FormInt(r *http.Request, s string) int {
+	i, _ := strconv.Atoi(r.FormValue(s))
+	return i
+}
+
+// FormUInt return a uint.
+func FormUInt(r *http.Request, s string) uint {
+	i := FormInt(r, s)
+	if i < 0 {
+		return 0
+	}
+	return uint(i)
+}
+
+// FormBool return true if the form value is set to true|TRUE|yes|YES|1
+func FormBool(r *http.Request, s string) bool {
+	v := r.FormValue(s)
+	switch v {
+	case "true", "TRUE", "yes", "YES", "1":
+		return true
+	default:
+		return false
 	}
 }

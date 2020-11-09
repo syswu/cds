@@ -2,24 +2,14 @@ package cdn
 
 import (
 	"context"
+	"fmt"
 	"net/http"
-	"sync"
 
-	"go.opencensus.io/stats"
-	"go.opencensus.io/tag"
-
+	"github.com/go-gorp/gorp"
+	"github.com/ovh/cds/engine/cdn/storage"
 	"github.com/ovh/cds/engine/service"
 	"github.com/ovh/cds/sdk"
 	"github.com/ovh/cds/sdk/log"
-	"github.com/ovh/cds/sdk/telemetry"
-)
-
-var (
-	onceMetrics        sync.Once
-	Errors             *stats.Int64Measure
-	Hits               *stats.Int64Measure
-	WorkerLogReceived  *stats.Int64Measure
-	ServiceLogReceived *stats.Int64Measure
 )
 
 func (s *Service) statusHandler() service.Handler {
@@ -29,45 +19,87 @@ func (s *Service) statusHandler() service.Handler {
 	}
 }
 
-func (s *Service) Status(ctx context.Context) sdk.MonitoringStatus {
-	m := s.CommonMonitoring()
-	status := sdk.MonitoringStatusOK
-	m.Lines = append(m.Lines, sdk.MonitoringStatusLine{Component: "CDN", Value: status, Status: status})
+func addMonitoringLine(nb int64, text string, err error, status string) sdk.MonitoringStatusLine {
+	if err != nil {
+		return sdk.MonitoringStatusLine{
+			Component: text,
+			Value:     fmt.Sprintf("Error: %v", err),
+			Status:    sdk.MonitoringStatusAlert,
+		}
+	}
+	return sdk.MonitoringStatusLine{
+		Component: text,
+		Value:     fmt.Sprintf("%d", nb),
+		Status:    status,
+	}
+}
+
+// Status returns the monitoring status for this service
+func (s *Service) Status(ctx context.Context) *sdk.MonitoringStatus {
+	m := s.NewMonitoringStatus()
+
+	if !s.Cfg.EnableLogProcessing {
+		return m
+	}
+	db := s.mustDBWithCtx(ctx)
+
+	nbCompleted, err := storage.CountItemCompleted(db)
+	m.AddLine(addMonitoringLine(nbCompleted, "items/completed", err, sdk.MonitoringStatusOK))
+
+	nbIncoming, err := storage.CountItemIncoming(db)
+	m.AddLine(addMonitoringLine(nbIncoming, "items/incoming", err, sdk.MonitoringStatusOK))
+
+	m.AddLine(s.LogCache.Status(ctx)...)
+	m.AddLine(s.getStatusSyncLogs()...)
+
+	for _, st := range s.Units.Storages {
+		m.AddLine(s.computeStatusBackend(ctx, db, nbCompleted, st)...)
+	}
+
+	m.AddLine(s.DBConnectionFactory.Status(ctx))
+
 	return m
 }
 
-func (s *Service) initMetrics(ctx context.Context) error {
-	var err error
-	onceMetrics.Do(func() {
-		Errors = stats.Int64(
-			"cdn/tcp/router_errors",
-			"number of errors",
-			stats.UnitDimensionless)
-		Hits = stats.Int64(
-			"cdn/tcp/router_hits",
-			"number of hits",
-			stats.UnitDimensionless)
-		WorkerLogReceived = stats.Int64(
-			"cdn/tcp/worker/log/count",
-			"Number of worker log received",
-			stats.UnitDimensionless)
-		ServiceLogReceived = stats.Int64(
-			"cdn/tcp/service/log/count",
-			"Number of service log received",
-			stats.UnitDimensionless)
+func (s *Service) computeStatusBackend(ctx context.Context, db *gorp.DbMap, nbCompleted int64, storageUnit storage.StorageUnit) []sdk.MonitoringStatusLine {
+	lines := storageUnit.Status(ctx)
 
-		tagServiceType := telemetry.MustNewKey(telemetry.TagServiceType)
-		tagServiceName := telemetry.MustNewKey(telemetry.TagServiceName)
+	currentSize, err := storage.CountItemUnitByUnit(db, storageUnit.ID())
+	if err != nil {
+		log.Info(ctx, "cdn:status: err:%v", err)
+		lines = append(lines, addMonitoringLine(currentSize, "backend/"+storageUnit.Name()+"/items", err, sdk.MonitoringStatusAlert))
+	} else {
+		lines = append(lines, addMonitoringLine(currentSize, "backend/"+storageUnit.Name()+"/items", err, sdk.MonitoringStatusOK))
+	}
 
-		err = telemetry.RegisterView(ctx,
-			telemetry.NewViewCount("cdn/tcp/router/router_errors", Errors, []tag.Key{tagServiceType, tagServiceName}),
-			telemetry.NewViewCount("cdn/tcp/router/router_hits", Hits, []tag.Key{tagServiceType, tagServiceName}),
-			telemetry.NewViewCount("cdn/tcp/worker/log/count", WorkerLogReceived, []tag.Key{tagServiceType, tagServiceName}),
-			telemetry.NewViewCount("cdn/tcp/service/log/count", ServiceLogReceived, []tag.Key{tagServiceType, tagServiceName}),
-		)
-	})
+	var previousLag, previousSize int64
 
-	log.Debug("cdn> Stats initialized")
+	lagKey := storageUnit.ID() + "lag"
+	sizeKey := storageUnit.ID() + "size"
 
-	return err
+	// load previous values computed
+	r, ok := s.storageUnitLags.Load(lagKey)
+	if !ok {
+		previousLag = 0
+	} else {
+		previousLag = r.(int64)
+	}
+	siz, ok := s.storageUnitLags.Load(sizeKey)
+	if !ok {
+		previousSize = 0
+	} else {
+		previousSize = siz.(int64)
+	}
+
+	currentLag := nbCompleted - currentSize
+	// if we have less lag than previous compute or if the currentSize is greater than previous compute, it's OK
+	if currentLag == 0 || (currentLag > 0 && currentLag < previousLag || currentSize > previousSize) {
+		lines = append(lines, addMonitoringLine(currentLag, "backend/"+storageUnit.Name()+"/lag", err, sdk.MonitoringStatusOK))
+	} else {
+		lines = append(lines, addMonitoringLine(currentLag, "backend/"+storageUnit.Name()+"/lag", err, sdk.MonitoringStatusWarn))
+	}
+
+	s.storageUnitLags.Store(lagKey, currentLag)
+	s.storageUnitLags.Store(sizeKey, currentSize)
+	return lines
 }

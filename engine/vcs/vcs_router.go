@@ -2,11 +2,15 @@ package vcs
 
 import (
 	"context"
-
-	"github.com/ovh/cds/engine/service"
+	"net/http"
+	"reflect"
+	"runtime"
+	"strings"
 
 	"github.com/ovh/cds/engine/api"
+	"github.com/ovh/cds/engine/service"
 	"github.com/ovh/cds/sdk/log"
+	"github.com/ovh/cds/sdk/telemetry"
 )
 
 func (s *Service) initRouter(ctx context.Context) {
@@ -14,14 +18,15 @@ func (s *Service) initRouter(ctx context.Context) {
 	r := s.Router
 	r.Background = ctx
 	r.URL = s.Cfg.URL
-	r.SetHeaderFunc = api.DefaultHeaders
-	r.Middlewares = append(r.Middlewares, service.CheckRequestSignatureMiddleware(s.ParsedAPIPublicKey), s.authMiddleware, api.TracingMiddlewareFunc(s, nil, nil))
+	r.SetHeaderFunc = service.DefaultHeaders
+	r.DefaultAuthMiddleware = service.CheckRequestSignatureMiddleware(s.ParsedAPIPublicKey)
+	r.PostAuthMiddlewares = append(r.PostAuthMiddlewares, s.authMiddleware, TracingMiddlewareFunc(s))
 	r.PostMiddlewares = append(r.PostMiddlewares, api.TracingPostMiddleware)
 
-	r.Handle("/mon/version", nil, r.GET(api.VersionHandler, api.Auth(false)))
-	r.Handle("/mon/status", nil, r.GET(s.statusHandler, api.Auth(false)))
-	r.Handle("/mon/metrics", nil, r.GET(service.GetPrometheustMetricsHandler(s), api.Auth(false)))
-	r.Handle("/mon/metrics/all", nil, r.GET(service.GetMetricsHandler, api.Auth(false)))
+	r.Handle("/mon/version", nil, r.GET(service.VersionHandler, service.OverrideAuth(service.NoAuthMiddleware)))
+	r.Handle("/mon/status", nil, r.GET(s.statusHandler, service.OverrideAuth(service.NoAuthMiddleware)))
+	r.Handle("/mon/metrics", nil, r.GET(service.GetPrometheustMetricsHandler(s), service.OverrideAuth(service.NoAuthMiddleware)))
+	r.Handle("/mon/metrics/all", nil, r.GET(service.GetMetricsHandler, service.OverrideAuth(service.NoAuthMiddleware)))
 
 	r.Handle("/vcs", nil, r.GET(s.getAllVCSServersHandler))
 	r.Handle("/vcs/{name}", nil, r.GET(s.getVCSServersHandler))
@@ -50,4 +55,24 @@ func (s *Service) initRouter(ctx context.Context) {
 	r.Handle("/vcs/{name}/repos/{owner}/{repo}/forks", nil, r.GET(s.getListForks))
 
 	r.Handle("/vcs/{name}/status", nil, r.POST(s.postStatusHandler))
+}
+
+func TracingMiddlewareFunc(s service.Service) service.Middleware {
+	return func(ctx context.Context, w http.ResponseWriter, req *http.Request, rc *service.HandlerConfig) (context.Context, error) {
+		name := runtime.FuncForPC(reflect.ValueOf(rc.Handler).Pointer()).Name()
+		name = strings.Replace(name, ".func1", "", 1)
+
+		splittedName := strings.Split(name, ".")
+		name = splittedName[len(splittedName)-1]
+
+		opts := telemetry.Options{
+			Name: name,
+		}
+
+		ctx, err := telemetry.Start(ctx, s, w, req, opts)
+		newReq := req.WithContext(ctx)
+		*req = *newReq
+
+		return ctx, err
+	}
 }

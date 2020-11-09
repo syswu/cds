@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/ovh/cds/engine/api/cache"
+	"github.com/ovh/cds/engine/cache"
 	"github.com/ovh/cds/engine/gorpmapper"
 	"github.com/ovh/cds/sdk"
 	"github.com/ovh/cds/sdk/exportentities"
@@ -72,7 +72,6 @@ func ParseAndImport(ctx context.Context, db gorpmapper.SqlExecutorWithTx, store 
 		}
 		return nil, nil, sdk.WrapError(err, "workflow is not valid")
 	}
-
 	if err := RenameNode(ctx, db, w); err != nil {
 		return nil, nil, sdk.WrapError(err, "Unable to rename node")
 	}
@@ -174,7 +173,7 @@ func ParseAndImport(ctx context.Context, db gorpmapper.SqlExecutorWithTx, store 
 
 			var err error
 			if w.WorkflowData.Node.Context.DefaultPayload, err = DefaultPayload(ctx, db, store, proj, w); err != nil {
-				return nil, nil, sdk.WrapError(err, "Unable to get default payload")
+				return nil, nil, err
 			}
 		}
 	}
