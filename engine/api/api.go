@@ -655,6 +655,8 @@ func (a *API) Serve(ctx context.Context) error {
 		log.Error(ctx, "error while initializing event system: %s", err)
 	}
 
+	log.Info(ctx, "Run event.DequeueEvent...")
+
 	a.GoRoutines.Run(ctx, "event.dequeue", func(ctx context.Context) {
 		event.DequeueEvent(ctx, a.mustDB())
 	}, a.PanicDump())

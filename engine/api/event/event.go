@@ -47,8 +47,10 @@ func getBroker(ctx context.Context, t string, option interface{}) (Broker, error
 
 // ResetPublicIntegrations load all integration of type Event and creates kafka brokers
 func ResetPublicIntegrations(ctx context.Context, db *gorp.DbMap) error {
+	log.Debug(ctx, "event - ResetPublicIntegrations start...")
 	publicBrokersConnectionCache = []Broker{}
 	filterType := sdk.IntegrationTypeEvent
+	log.Debug(ctx, "event - ResetPublicIntegrations LoadPublicModelsByTypeWithDecryption...")
 	integrations, err := integration.LoadPublicModelsByTypeWithDecryption(db, &filterType)
 	if err != nil {
 		return sdk.WrapError(err, "cannot load public models for event type")
@@ -57,6 +59,7 @@ func ResetPublicIntegrations(ctx context.Context, db *gorp.DbMap) error {
 	for _, integration := range integrations {
 		for _, cfg := range integration.PublicConfigurations {
 			kafkaCfg := getKafkaConfig(cfg)
+			log.Debug(ctx, "event - ResetPublicIntegrations getBroker on %q...", kafkaCfg.BrokerAddresses)
 			kafkaBroker, err := getBroker(ctx, "kafka", kafkaCfg)
 			if err != nil {
 				return sdk.WrapError(err, "cannot get broker for %s and user %s", cfg["broker url"].Value, cfg["username"].Value)
@@ -66,6 +69,7 @@ func ResetPublicIntegrations(ctx context.Context, db *gorp.DbMap) error {
 		}
 	}
 
+	log.Debug(ctx, "event - ResetPublicIntegrations end...")
 	return nil
 }
 
@@ -122,12 +126,14 @@ func ResetEventIntegration(ctx context.Context, db gorp.SqlExecutor, eventIntegr
 
 // Initialize initializes event system
 func Initialize(ctx context.Context, db *gorp.DbMap, cache Store) error {
+	log.Info(ctx, "event - Initialize start...")
 	store = cache
 	var err error
 	hostname, err = os.Hostname()
 	if err != nil {
 		hostname = fmt.Sprintf("Error while getting Hostname: %v", err)
 	}
+	log.Debug(ctx, "event - hostname is %q", hostname)
 	// generates an API name. api_foo_bar, only 3 first letters to have a readable status
 	cdsname = "api_"
 	for _, v := range strings.Split(namesgenerator.GetRandomNameCDS(0), "_") {
